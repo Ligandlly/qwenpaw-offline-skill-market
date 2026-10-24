@@ -1,5 +1,8 @@
 # QwenPaw 离线技能市场
 
+[![backend](https://github.com/Ligandlly/qwenpaw-offline-skill-market/actions/workflows/backend.yml/badge.svg)](https://github.com/Ligandlly/qwenpaw-offline-skill-market/actions/workflows/backend.yml)
+[![plugin](https://github.com/Ligandlly/qwenpaw-offline-skill-market/actions/workflows/plugin.yml/badge.svg)](https://github.com/Ligandlly/qwenpaw-offline-skill-market/actions/workflows/plugin.yml)
+
 给 **QwenPaw 2.2.2** 加一个可完全离线部署的内部技能市场：租户在 Console 里浏览/安装技能，也可以发布自己的技能；Hub 管理员在独立后台下架违规内容。
 
 ```
@@ -72,7 +75,19 @@ python3 deploy/scripts/preflight.py --market-url ... --runtimes-dir ... --app-ur
 - `X-Tenant-Id` 是内网信任而非认证；审计只到租户粒度（前提是一租户一人）。
 - 限额只认环境变量，调整需重启后端。
 
-## CI
+## CI 与发版
 
-`.github/workflows/backend.yml`：`fmt` / `clippy -D warnings` / `cargo test` → release 构建 → 打 tag 时发 Release 资产。
-`.github/workflows/plugin.yml`：`pytest`（不需要 QwenPaw 本体、不需要网络）。
+| 工作流 | 触发 | 内容 |
+| --- | --- | --- |
+| `backend.yml` | 改动 `backend/**`、推 tag `v*`、手动 | `cargo fmt --check` → `clippy -D warnings` → `cargo test --all-targets` → release 构建 → 上传 artifact；**推 `v*` tag 时自动建 Release 并附二进制 tarball + sha256** |
+| `plugin.yml` | 改动 `plugin/**`、手动 | `pytest`（30 项，不装 QwenPaw、不联网）+ `compileall` |
+
+发一个版本：
+
+```bash
+git tag v0.1.0 && git push origin v0.1.0
+# → Release 里会多出 offline-market-backend-<ver>-linux-x86_64.tar.gz(.sha256)
+```
+
+CI 不安装 QwenPaw（40 MB wheel + 84 个依赖）；插件测试用 `qwenpaw.market` 的桩类型，
+本地有真 QwenPaw 时自动用真的，`OFFLINE_MARKET_STUB_MARKET=1` 可强制走桩。
