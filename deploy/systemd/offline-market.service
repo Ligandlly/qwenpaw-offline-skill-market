@@ -1,0 +1,25 @@
+# 裸二进制部署（不用容器时）。复制到 /etc/systemd/system/ 后：
+#   systemctl daemon-reload && systemctl enable --now offline-market
+[Unit]
+Description=Offline skill market backend (QwenPaw 2.2.2)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=offline-market
+Group=offline-market
+WorkingDirectory=/opt/offline-market
+EnvironmentFile=/etc/offline-market/env
+ExecStart=/opt/offline-market/offline-market-backend
+Restart=on-failure
+RestartSec=3
+# 只允许内网访问时，建议用 MARKET_BIND 绑内网地址，并在防火墙上限制来源。
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/offline-market
+
+[Install]
+WantedBy=multi-user.target

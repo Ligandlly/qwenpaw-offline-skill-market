@@ -1,0 +1,39 @@
+# spike environments (hundreds of MB, never commit)
+spikes/.venv/
+spikes/.venv-lite/
+
+# spike logs
+spikes/*.log
+spikes/**/*.log
+
+# python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# rust (backend project)
+target/
+
+# local data
+data/
+*.sqlite
+*.sqlite3
+*.db
+
+# os
+.DS_Store
+Thumbs.db
+
+# plugin python
+.pytest_cache/
+*.egg-info/
+
+# release bundles
+dist/
+
+# verification screenshots (contain local console content)
+spikes/m3-*.png
+
+# stray logs
+*.log

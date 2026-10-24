@@ -1,0 +1,47 @@
+name: plugin
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "plugin/**"
+      - ".github/workflows/plugin.yml"
+  pull_request:
+    paths:
+      - "plugin/**"
+      - ".github/workflows/plugin.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: plugin-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: pytest (no QwenPaw, no network)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: plugin
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install test deps
+        run: |
+          python -m pip install --upgrade pip
+          # The plugin itself is stdlib-only; tests need pytest + fastapi/httpx
+          # for the route layer. qwenpaw is deliberately NOT installed.
+          python -m pip install pytest "fastapi>=0.110" "httpx>=0.27"
+
+      - name: Run tests
+        run: python -m pytest -q
+
+      - name: Byte-compile every module
+        run: python -m compileall -q offline_market backend.py

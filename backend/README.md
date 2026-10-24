@@ -1,0 +1,113 @@
+# offline-market-backend
+
+QwenPaw 2.2.2 离线技能市场的后端（Rust + axum + SQLite）。**不做安装**：bundle 校验、扫描、安装全部由 QwenPaw 宿主保留，这里只负责存储、分发、权限、审计。
+
+```bash
+cargo run                 # 默认 0.0.0.0:8080, data/market.sqlite3
+cargo test                # 20 个测试（10 单测 + 10 集成）
+```
+
+首次启动若未设置 `ADMIN_PASSWORD`，会生成一次性管理员密码并打印一次。
+
+## 环境变量（改任何一项都要重启，PLAN §1）
+
+| 变量 | 默认 | 说明 |
+| --- | --- | --- |
+| `MARKET_BIND` | `0.0.0.0:8080` | 监听地址 |
+| `MARKET_DB` | `data/market.sqlite3` | SQLite 路径（WAL） |
+| `MARKET_PUBLIC_URL` | `http://localhost:8080` | 生成 `install_url`，必须是租户运行时**能访问到**的地址 |
+| `ADMIN_USER` | `admin` | 首个管理员用户名 |
+| `ADMIN_PASSWORD` | 空 → 随机生成并打印 | 首个管理员密码；`admin_users` 非空后不再生效 |
+| `MARKET_MAX_BUNDLE_BYTES` | `2097152`（2 MiB） | 单包总字节 |
+| `MARKET_MAX_FILES` | `100` | 文件数 |
+| `MARKET_MAX_FILE_BYTES` | `262144`（256 KiB） | 单文件字节 |
+| `MARKET_MAX_PATH_DEPTH` | `3` | 路径层级上限 |
+
+## 两个身份面
+
+| 面 | 认证方式 | 谁在调用 |
+| --- | --- | --- |
+| 租户面 `/api/v1/*`, `/skills/*` | `X-Tenant-Id` 头（插件从 `QWENPAW_TENANT_ID` 转发） | QwenPaw 插件 → 本后端（浏览器**不能**直连，否则等于把身份交给用户） |
+| 管理面 `/admin/api/*` | 用户名 + Argon2 密码 → 服务端 session cookie（12h） | 管理员浏览器 |
+
+`X-Tenant-Id` 不是认证，是**内网信任**。后端必须部署在只有租户运行时能访问的网段。
+
+## 租户面
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| GET | `/api/v1/limits` | 插件据此对齐预检阈值，避免前后不一致 |
+| GET | `/api/v1/skills?q=&page=&limit=` | 市场列表：公开 + 自己的私有；已撤回/已下架不出现 |
+| GET | `/api/v1/skills/mine` | 自己的全部（含已撤回） |
+| GET | `/api/v1/skills/{slug}/status` | `active` / `withdrawn` / `taken_down`，用于"已安装但被下架"标记 |
+| POST | `/api/v1/skills` | 发布不可变版本 |
+| POST | `/api/v1/skills/{slug}/withdraw` | 属主撤回（可恢复） |
+| POST | `/api/v1/skills/{slug}/restore` | 属主恢复；被管理员下架的不可自恢复（409） |
+| GET | `/skills/{slug}/{version}` | **`bundle_url`**，返回 `{name, version, files, source_url}`；`version=latest` 走指针 |
+| GET | `/api/v1/skills/{slug}/{version}/bundle` | 同上（别名） |
+
+发布请求体：
+
+```json
+{
+  "name": "Demo Skill",
+  "slug": "demo",
+  "version": "1.0.0",
+  "visibility": "public",
+  "files": { "SKILL.md": "---\nname: demo\ndescription: ...\n---\n", "scripts/hello.py": "print(1)\n" }
+}
+```
+
+## 管理面
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| POST | `/admin/api/login` | `{username,password}` → `Set-Cookie: market_admin=…` |
+| POST | `/admin/api/logout` | 使会话失效 |
+| GET | `/admin/api/skills?q=&limit=` | 全部技能（含已撤回/已下架） |
+| POST | `/admin/api/skills/{slug}/takedown` | `{reason}` → 整包下架、禁止再分发 |
+| POST | `/admin/api/skills/{slug}/restore` | 撤销下架 |
+| GET | `/admin/api/audit?limit=` | 审计日志（租户粒度） |
+
+## 语义（都有测试覆盖）
+
+- **版本不可变**：同 `slug+version` 二次发布 → 409 `version_exists`；`latest` 只前进不回退。
+- **slug 归属**：别人已占用的 slug 发布 → 403，不能劫持。
+- **私有**：非属主列表不可见、下载 403、状态查询 404（fail-closed）。
+- **撤回 vs 下架**：撤回 = 属主行为，市场消失、他人 410、属主仍可取；下架 = 管理员行为，整包 410（含属主），且属主不能自恢复、不能再发布新版本覆盖。
+- **发布闸门**：必须是合法路径（无 `..`/绝对路径/反斜杠/盘符/控制字符，深度 ≤3）、必须含 `SKILL.md`、`SKILL.md` frontmatter 必须有非空 `name` 与 `description`、体积与文件数达标。
+  - frontmatter 这条不是洁癖：宿主 `qwenpaw/agents/skill_system/store.py:validate_skill_content` 会拒绝安装缺 `description` 的包，**实测**发布成功但安装失败。前置拦截只是把错误提前。
+  - 闸门**不限制文件类型**（PLAN §1 的决定）：`.so`/`.exe` 能进市场。真正的恶意代码防线在安装侧，见下。
+
+## 部署硬要求：`QWENPAW_SKILL_SCAN_MODE=block`
+
+宿主扫描器默认 `warn`：实测一个含 `exec(input())` 的包被扫出 CRITICAL、记日志、然后**照样安装并启用**。只有 `block` 才会 `failed: security_scan_failed` 且磁盘无残留。
+
+所以每个租户运行时的环境里必须带：
+
+```
+QWENPAW_SKILL_SCAN_MODE=block
+```
+
+检查工具：`spikes/s5_scan_mode_gate.py`（`warn` 退出码 1，可用作部署 preflight）。
+
+## 与 PLAN 的一处实现差异
+
+PLAN 原写"包存 `data/packages/{slug}/{version}/` 本地磁盘"。实现改成 **bundle 直接以 JSON 存在 SQLite `skill_versions.bundle_json`**：
+
+- 单包上限 2 MiB、量级百个 → 单库几 GB 级别可控；
+- 避免"磁盘文件与 DB 行不一致"这类最难排查的问题（备份 = 拷一个 `.sqlite3` 文件）；
+- 代价：包体不能做流式发送，读取时整块进内存（2 MiB 上限下可接受）。
+
+## 镜像
+
+```bash
+docker build -t offline-market:0.1 .
+docker run -p 8080:8080 -v $PWD/data:/data \
+  -e MARKET_DB=/data/market.sqlite3 \
+  -e MARKET_PUBLIC_URL=http://market.internal:8080 \
+  -e ADMIN_USER=admin -e ADMIN_PASSWORD='...' \
+  offline-market:0.1
+```
+
+离线环境：在有网的机器上 `cargo build --release`（或 build 镜像），把 `target/release/offline-market-backend` 静态二进制带进内网即可；运行期零依赖（SQLite 已 bundled 进二进制）。

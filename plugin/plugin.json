@@ -1,0 +1,18 @@
+{
+  "id": "offline-market",
+  "version": "0.1.0",
+  "name": "Offline Skill Market",
+  "description": "Local skill marketplace for air-gapped QwenPaw hubs: browse, install, publish.",
+  "author": "platform",
+  "type": "hub",
+  "entry": {
+    "backend": "backend.py",
+    "frontend": "frontend/market.js"
+  },
+  "qwenpaw_version": {
+    "min": "2.2.2"
+  },
+  "meta": {
+    "market_key": "offline-market"
+  }
+}

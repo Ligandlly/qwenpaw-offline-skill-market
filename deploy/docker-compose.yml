@@ -1,0 +1,40 @@
+# 离线技能市场后端 + 内网部署
+#
+# 说明：
+#  * 只跑后端；QwenPaw hub 与租户 runtime 由你们自己的 compose 管理。
+#  * 数据（SQLite + WAL）落在 named volume `market-data`，备份就是拷 sqlite 文件。
+#  * 生产必须给 ADMIN_PASSWORD；不填会在首次启动时随机生成并打到日志里。
+services:
+  market:
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+    image: offline-market:0.1
+    container_name: offline-market
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      MARKET_DB: /data/market.sqlite3
+      MARKET_BIND: 0.0.0.0:8080
+      # 租户 runtime 必须能访问到这个地址（内网 IP / 内网 DNS 名）
+      MARKET_PUBLIC_URL: ${MARKET_PUBLIC_URL:-http://market.internal:8080}
+      ADMIN_USER: ${ADMIN_USER:-admin}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?set ADMIN_PASSWORD in .env}
+      MARKET_MAX_BUNDLE_BYTES: ${MARKET_MAX_BUNDLE_BYTES:-2097152}
+      MARKET_MAX_FILES: ${MARKET_MAX_FILES:-100}
+      MARKET_MAX_FILE_BYTES: ${MARKET_MAX_FILE_BYTES:-262144}
+      MARKET_MAX_PATH_DEPTH: ${MARKET_MAX_PATH_DEPTH:-3}
+    volumes:
+      - market-data:/data
+    ports:
+      - "${MARKET_PORT:-8080}:8080"
+    healthcheck:
+      test: ["CMD", "sh", "-c", "wget -qO- http://127.0.0.1:8080/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  market-data:

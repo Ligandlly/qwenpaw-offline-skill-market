@@ -1,0 +1,17 @@
+{
+  "id": "offline-market-spike",
+  "version": "0.0.1",
+  "name": "Offline Skill Market (spike)",
+  "description": "Spike plugin: a local skill-market provider for air-gapped QwenPaw 2.2.2.",
+  "author": "spike",
+  "type": "hub",
+  "entry": {
+    "backend": "backend.py"
+  },
+  "qwenpaw_version": {
+    "min": "2.2.2"
+  },
+  "meta": {
+    "market_key": "offline-market"
+  }
+}
