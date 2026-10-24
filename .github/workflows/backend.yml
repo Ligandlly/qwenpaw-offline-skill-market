@@ -57,6 +57,9 @@ jobs:
     name: release build (linux x86_64)
     needs: test
     runs-on: ubuntu-latest
+    # the release asset upload needs write access; the workflow default is read
+    permissions:
+      contents: write
     defaults:
       run:
         working-directory: backend
