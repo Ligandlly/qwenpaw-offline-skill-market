@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -12,6 +13,48 @@ import pytest
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 if str(PLUGIN_ROOT) not in sys.path:
     sys.path.insert(0, str(PLUGIN_ROOT))
+
+
+def _install_qwenpaw_stub() -> None:
+    """Stand in for the host's `qwenpaw.market` when QwenPaw is not installed.
+
+    The provider builds `MarketResult` objects for the host, so the type has to
+    exist. CI deliberately does not install QwenPaw (40 MB + 80 deps), so the
+    tests supply a stub with the 2.2.2 field set. Set OFFLINE_MARKET_STUB_MARKET=1
+    to force the stub even where a real QwenPaw is importable.
+    """
+    if os.environ.get("OFFLINE_MARKET_STUB_MARKET") != "1":
+        try:
+            import qwenpaw.market  # noqa: F401
+
+            return
+        except Exception:  # noqa: BLE001 - any import failure means "not usable"
+            pass
+
+    import types
+    from dataclasses import dataclass
+
+    @dataclass(frozen=True)
+    class MarketResult:  # mirrors qwenpaw/market/schema.py @ v2.2.2
+        source: str
+        slug: str
+        name: str
+        description: str | None = None
+        source_url: str = ""
+        version: str | None = None
+        author: str | None = None
+        icon_url: str | None = None
+        stats: dict | None = None
+
+    package = types.ModuleType("qwenpaw")
+    market = types.ModuleType("qwenpaw.market")
+    market.MarketResult = MarketResult
+    package.market = market
+    sys.modules["qwenpaw"] = package
+    sys.modules["qwenpaw.market"] = market
+
+
+_install_qwenpaw_stub()
 
 
 class FakeBackend:
