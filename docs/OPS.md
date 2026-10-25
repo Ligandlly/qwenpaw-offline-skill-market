@@ -160,10 +160,25 @@ CRITICAL、记一条日志、然后**照常安装并启用**。插件两者都�
 
 ### 2.3 安装插件
 
+两条路，按机器状态选。**App 没跑时只能用目录**（2.2.2 不会解压本地 zip）：
+
 ```bash
-qwenpaw plugin install ./plugin        # 已装则加 --force
+# A. App 已停止 / 内网首次安装：解压出 zip，再装目录
+sha256sum -c offline-market-plugin-<ver>-linux-x86_64.zip.sha256
+unzip offline-market-plugin-<ver>-linux-x86_64.zip
+qwenpaw plugin install ./offline-market --force
 qwenpaw plugin list                    # 期望看到 ID: offline-market
+
+# B. App 正在运行：zip 直接热装（走 POST /api/plugins/upload）
+qwenpaw plugin install offline-market-plugin-<ver>-linux-x86_64.zip --force
+
+# C. 只有源码目录
+qwenpaw plugin install ./plugin --force
 ```
+
+zip 来自 GitHub Release / `plugin-package.yml` 的 artifact，或本地
+`python3 deploy/scripts/build-plugin-zip.py`。插件是纯 Python + stdlib，
+包里没有平台相关的二进制，`linux-x86_64` 只标明目标机器。
 
 插件目录是副本：更新插件必须 `--force` 重装，然后重启 runtime。
 
@@ -286,7 +301,7 @@ python3 deploy/scripts/e2e.py --skip-a \
 | 备份 | 停机或 `sqlite3 market.sqlite3 ".backup /backup/market-$(date +%F).sqlite3"`；包体也存在库里，一个文件就是全部 |
 | 恢复 | 停后端 → 覆盖 sqlite 文件 → 启动；`-wal`/`-shm` 一并清掉 |
 | 升级后端 | 换二进制/镜像，重启；schema 目前是 `CREATE TABLE IF NOT EXISTS`，无迁移步骤 |
-| 升级插件 | `qwenpaw plugin install ./plugin --force` 后重启 runtime |
+| 升级插件 | `unzip <新 zip>` → `qwenpaw plugin install ./offline-market --force`（App 运行时可直接 `plugin install <新 zip> --force`）后重启 runtime |
 
 ---
 

@@ -1,0 +1,95 @@
+name: plugin-package
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+    paths:
+      - "plugin/**"
+      - "deploy/scripts/build-plugin-zip.py"
+      - ".github/workflows/plugin-package.yml"
+  pull_request:
+    paths:
+      - "plugin/**"
+      - "deploy/scripts/build-plugin-zip.py"
+      - ".github/workflows/plugin-package.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: plugin-package-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    name: pytest → 离线插件 zip (linux x86_64)
+    runs-on: ubuntu-latest
+    # tag 时要把 zip 挂到 Release 上，需要写权限
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 安装测试依赖
+        run: |
+          python -m pip install --upgrade pip
+          # 插件本身只用 stdlib；测试需要 pytest + fastapi/httpx。
+          python -m pip install pytest "fastapi>=0.110" "httpx>=0.27"
+
+      - name: pytest
+        working-directory: plugin
+        run: python -m pytest -q
+
+      - name: 打包（zip + sha256）
+        id: pack
+        run: |
+          set -euo pipefail
+          python deploy/scripts/build-plugin-zip.py
+          zip="$(ls dist/*.zip)"
+          echo "zip=${zip}" >> "$GITHUB_OUTPUT"
+          echo "name=$(basename "${zip}" .zip)" >> "$GITHUB_OUTPUT"
+          cat "${zip}.sha256"
+
+      # 打包脚本自己会按宿主的规则验一遍；这里再用独立的方式确认
+      # 包能解压、能字节编译，且没把测试/缓存带进去。
+      - name: 校验 zip
+        env:
+          ZIP: ${{ steps.pack.outputs.zip }}
+        run: |
+          set -euo pipefail
+          python -m zipfile -t "${ZIP}"
+
+          if python -m zipfile -l "${ZIP}" | grep -Eq '__pycache__|\.pyc|/tests/|\.ruff_cache'; then
+            echo "包里混进了测试或缓存文件"; exit 1
+          fi
+
+          rm -rf /tmp/plugin-check && mkdir -p /tmp/plugin-check
+          python -m zipfile -e "${ZIP}" /tmp/plugin-check
+          test -f /tmp/plugin-check/offline-market/plugin.json
+          python -m compileall -q /tmp/plugin-check/offline-market
+
+      - name: 上传 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.pack.outputs.name }}
+          path: |
+            dist/*.zip
+            dist/*.zip.sha256
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: 挂到 GitHub Release（仅 tag）
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.zip
+            dist/*.zip.sha256
+          # 这个 job 最快，通常由它建 Release；带 notes，避免建出空正文
+          generate_release_notes: true

@@ -8,12 +8,40 @@ python -m pytest          # 57 个测试，不需要宿主、不需要网络
 
 ## 装机
 
+源码目录直接装（开发机）：
+
 ```bash
 qwenpaw plugin install ./plugin        # 或 --force 覆盖更新
 qwenpaw plugin list                    # ID: offline-market
 ```
 
 插件目录是**副本**：改完源码要 `--force` 重装才生效（`~/.qwenpaw/plugins/offline-market/`）。
+
+### 离线 zip 包（Linux x64 内网机器）
+
+CI（`plugin-package.yml`）和本地都能产出同一个包：
+
+```bash
+python3 deploy/scripts/build-plugin-zip.py
+# -> dist/offline-market-plugin-<ver>-linux-x86_64.zip(.sha256)
+```
+
+包结构是 `offline-market/`（一个顶层目录，里面是 `plugin.json`、`backend.py`、
+`frontend/`、`offline_market/`）；纯 Python + stdlib，没有编译产物、
+没有 `requirements.txt`，所以包里没有任何跟 CPU/发行版绑定的东西。
+
+```bash
+sha256sum -c offline-market-plugin-<ver>-linux-x86_64.zip.sha256
+unzip offline-market-plugin-<ver>-linux-x86_64.zip
+qwenpaw plugin install ./offline-market --force
+qwenpaw plugin list                    # ID: offline-market
+```
+
+**为什么先解压**：QwenPaw 2.2.2 的 `plugin install` 只有在 App **正在运行**
+时才把本地 zip 传给 `POST /api/plugins/upload` 现场解压；App 停着时它走的是
+"把参数当目录"的分支，直接 `plugin install xxx.zip` 会报 `plugin.json not found`。
+内网首次安装通常是停机状态，所以统一按"解压 → 装目录"来。
+（App 已运行时也可以 `qwenpaw plugin install <zip>` 热装，不用解压。）
 
 ## 运行时环境变量（每个租户 runtime 都必须有）
 
