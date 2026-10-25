@@ -3,6 +3,9 @@
 
 from __future__ import annotations
 
+import io
+import zipfile
+
 import pytest
 
 fastapi = pytest.importorskip("fastapi")
@@ -12,6 +15,14 @@ from fastapi.testclient import TestClient  # noqa: E402
 from offline_market.client import BackendClient  # noqa: E402
 from offline_market.routes import build_router  # noqa: E402
 from offline_market.runtime import PluginSettings  # noqa: E402
+
+
+def make_zip(entries: dict[str, str]) -> bytes:
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+        for name, data in entries.items():
+            archive.writestr(name, data)
+    return buffer.getvalue()
 
 
 @pytest.fixture
@@ -35,7 +46,7 @@ def test_config_endpoint_reports_gate_and_problems(api, env):
 
 
 def test_routes_are_unavailable_when_not_configured(api, env):
-    env.delenv("OFFLINE_MARKET_URL")
+    env.delenv("QWENPAW_TENANT_ID")
     response = api.get("/offline-market/mine")
     assert response.status_code == 503
     assert response.json()["detail"]["code"] == "not_configured"
@@ -77,6 +88,61 @@ def test_publish_forwards_visibility_and_rejects_bad_files(api, env, backend):
     )
     assert missing.status_code == 400
     assert "version" in missing.json()["detail"]["message"]
+
+
+def test_publish_zip_extracts_the_archive_and_forwards_the_files(api, env, backend):
+    backend.on(
+        "POST",
+        "/api/v1/skills",
+        201,
+        {"slug": "demo", "version": "1.0.0", "file_count": 2},
+    )
+    response = api.post(
+        "/offline-market/skills/zip?name=Demo&version=1.0.0&visibility=tenant",
+        content=make_zip(
+            {
+                "my-skill/SKILL.md": "---\nname: demo\ndescription: x\n---\n",
+                "my-skill/scripts/run.py": "print(1)\n",
+            }
+        ),
+        headers={"content-type": "application/zip"},
+    )
+    assert response.status_code == 200
+    assert response.json()["file_count"] == 2
+    sent = backend.requests[-1]["body"]
+    assert sent["name"] == "Demo"
+    assert sent["visibility"] == "tenant"
+    assert sent["files"] == {
+        "SKILL.md": "---\nname: demo\ndescription: x\n---\n",
+        "scripts/run.py": "print(1)\n",
+    }
+
+
+def test_publish_zip_rejects_broken_archives_and_missing_fields(api, env, backend):
+    broken = api.post(
+        "/offline-market/skills/zip?name=Demo&version=1.0.0",
+        content=b"not a zip",
+        headers={"content-type": "application/zip"},
+    )
+    assert broken.status_code == 400
+    assert broken.json()["detail"]["code"] == "invalid_zip"
+
+    no_manifest = api.post(
+        "/offline-market/skills/zip?name=Demo&version=1.0.0",
+        content=make_zip({"README.md": "hi"}),
+        headers={"content-type": "application/zip"},
+    )
+    assert no_manifest.status_code == 400
+    assert no_manifest.json()["detail"]["code"] == "missing_manifest"
+
+    no_version = api.post(
+        "/offline-market/skills/zip?name=Demo",
+        content=make_zip({"SKILL.md": "#"}),
+        headers={"content-type": "application/zip"},
+    )
+    assert no_version.status_code == 400
+    assert "version" in no_version.json()["detail"]["message"]
+    assert not backend.requests  # nothing ever reached the backend
 
 
 def test_backend_errors_pass_through_with_their_status(api, env, backend):

@@ -9,6 +9,7 @@ use axum::Json;
 use rusqlite::params;
 use serde::Deserialize;
 use serde_json::{json, Value};
+use tracing::{debug, error, info, warn};
 
 use crate::api::{ApiError, SkillRow};
 use crate::auth::{self, Admin};
@@ -36,7 +37,7 @@ pub fn ensure_admin(app: &crate::state::App) -> Option<String> {
     let hash = match auth::hash_password(&password) {
         Ok(hash) => hash,
         Err(err) => {
-            eprintln!("cannot hash admin password: {err}");
+            error!(error = %err, "cannot hash admin password");
             return None;
         }
     };
@@ -44,7 +45,7 @@ pub fn ensure_admin(app: &crate::state::App) -> Option<String> {
         "INSERT INTO admin_users (username, password_hash, created_at) VALUES (?1, ?2, ?3)",
         params![app.cfg.admin_user, hash, now()],
     ) {
-        eprintln!("cannot create admin user: {err}");
+        error!(error = %err, "cannot create admin user");
         return None;
     }
     if generated {
@@ -123,6 +124,7 @@ pub async fn login(
             None,
             Some(&body.username),
         );
+        warn!(username = %body.username, "admin login failed");
         return Err(ApiError::new(
             StatusCode::UNAUTHORIZED,
             "invalid_credentials",
@@ -141,6 +143,7 @@ pub async fn login(
             None,
         );
     }
+    info!(username = %body.username, "admin login");
     let response = Json(json!({ "username": body.username })).into_response();
     let mut response = response;
     response.headers_mut().insert(
@@ -162,6 +165,7 @@ pub async fn logout(State(app): State<Shared>, admin: Admin, parts: Parts) -> Re
     }
     let db = app.db();
     let _ = audit(&db, &admin.actor(), "admin_logout", None, None, None);
+    info!(admin = %admin.0, "admin logout");
     let mut response = Json(json!({ "ok": true })).into_response();
     response.headers_mut().insert(
         header::SET_COOKIE,
@@ -209,6 +213,7 @@ pub async fn list_skills(
         .map_err(internal)?
         .collect::<rusqlite::Result<Vec<_>>>()
         .map_err(internal)?;
+    debug!(items = items.len(), "admin skill listing");
     Ok(Json(json!({ "items": items })))
 }
 
@@ -237,12 +242,19 @@ pub async fn takedown(
         )
         .map_err(internal)?;
     if changed == 0 {
+        warn!(admin = %admin.0, slug = %slug, "takedown: unknown skill");
         return Err(ApiError::new(
             StatusCode::NOT_FOUND,
             "not_found",
             "unknown skill",
         ));
     }
+    info!(
+        admin = %admin.0,
+        slug = %slug,
+        reason = reason.as_deref().unwrap_or("-"),
+        "skill taken down"
+    );
     audit(
         &db,
         &admin.actor(),
@@ -270,12 +282,14 @@ pub async fn restore(
         )
         .map_err(internal)?;
     if changed == 0 {
+        warn!(admin = %admin.0, slug = %slug, "admin restore: unknown skill");
         return Err(ApiError::new(
             StatusCode::NOT_FOUND,
             "not_found",
             "unknown skill",
         ));
     }
+    info!(admin = %admin.0, slug = %slug, "takedown revoked");
     audit(
         &db,
         &admin.actor(),
@@ -326,10 +340,12 @@ pub async fn audit_log(
         .map_err(internal)?
         .collect::<rusqlite::Result<Vec<_>>>()
         .map_err(internal)?;
+    debug!(items = items.len(), "audit log");
     Ok(Json(json!({ "items": items })))
 }
 
 fn internal(err: rusqlite::Error) -> ApiError {
+    error!(error = %err, "database error");
     ApiError::new(
         StatusCode::INTERNAL_SERVER_ERROR,
         "db_error",

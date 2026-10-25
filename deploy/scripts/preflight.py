@@ -68,7 +68,7 @@ def check_market(market_url: str, admin: str, password: str) -> None:
     if status == 200:
         print(
             f"        单包 {limits.get('max_bundle_bytes')} B / 文件 {limits.get('max_files')} 个"
-            f" / 单文件 {limits.get('max_file_bytes')} B / 深度 {limits.get('max_path_depth')}"
+            f" / 单文件 {limits.get('max_file_bytes')} B"
         )
 
     if password:
@@ -82,6 +82,36 @@ def check_market(market_url: str, admin: str, password: str) -> None:
             report(status == 200, "审计可读", str(status))
     else:
         report(False, "管理员登录", "未提供 --admin-password，跳过", warn=True)
+
+
+def advertised_public_url(market_url: str) -> str | None:
+    """后端按 MARKET_PUBLIC_URL 现算的 install_url 前缀（它才是权威值）。"""
+    status, payload, _ = http(
+        "GET",
+        f"{market_url.rstrip('/')}/api/v1/skills?limit=1",
+        headers={"x-tenant-id": "preflight"},
+    )
+    if status != 200:
+        return None
+    items = payload.get("items") if isinstance(payload, dict) else None
+    for item in items or []:
+        url = item.get("install_url")
+        if url:
+            return url.rsplit("/skills/", 1)[0]
+    return None
+
+
+def check_public_url(market_url: str, public_url: str) -> None:
+    print("\n后端对外广告的地址（MARKET_PUBLIC_URL）")
+    advertised = advertised_public_url(market_url)
+    if advertised is None:
+        report(False, "读取 install_url", "后端不可达或还没有技能可比对", warn=True)
+        return
+    report(
+        advertised.rstrip("/") == public_url.rstrip("/"),
+        "install_url 前缀 == MARKET_PUBLIC_URL",
+        f"后端广告 {advertised!r}，配置 {public_url!r}",
+    )
 
 
 def check_scan_dirs(paths: list[Path]) -> None:
@@ -105,6 +135,82 @@ def check_scan_dirs(paths: list[Path]) -> None:
     report(not offenders, f"{good}/{len(paths)} 个 config.json 为 block", "；".join(offenders[:5]))
     if offenders:
         print("        修复：deploy/scripts/enforce-scan-mode.py --runtimes-dir <hub runtimes>")
+
+
+def check_runtime_urls(public_url: str, paths: list[Path]) -> str | None:
+    """插件配置里的 market_url 必须与后端 MARKET_PUBLIC_URL 逐字符相同。
+
+    不一致的症状不是"连不上"，而是安装时宿主侧报
+    ``URL does not belong to Hub 'offline-market'``（见 OPS §2.1）。
+    返回 runtime 实际配置的地址，供容器内探活用。
+    """
+    print("\n租户 runtime 的市场地址（必须与 MARKET_PUBLIC_URL 逐字符相同）")
+    base = public_url.rstrip("/")
+    if not paths:
+        report(False, "未提供 --runtimes-dir", "无法校验租户 runtime 地址", warn=True)
+        return None
+    offenders = []
+    checked = 0
+    runtime_url = None
+    for path in paths:
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8") or "{}")
+        except Exception as exc:  # noqa: BLE001
+            offenders.append(f"{path}（读取失败：{exc}）")
+            continue
+        raw = (payload.get("plugins", {}).get("offline-market") or {}).get("market_url")
+        if not raw:
+            continue  # 没配就走 credentials/默认值，这里不下结论
+        checked += 1
+        runtime_url = runtime_url or str(raw)
+        if str(raw).rstrip("/") != base:
+            offenders.append(f"{path}（market_url={raw!r}）")
+    if not offenders:
+        report(True, f"{checked} 个 config.json 的 market_url 与后端一致")
+    else:
+        report(False, "market_url 与 MARKET_PUBLIC_URL 不一致", "；".join(offenders[:5]))
+    return runtime_url
+
+
+def check_runtime_container(container: str, market_url: str) -> None:
+    """从 runtime 容器内部探一次后端。
+
+    宿主机能访问不代表容器能访问：Docker Desktop（Windows）把发布端口只挂在
+    127.0.0.1 与网桥地址上，宿主机自己的局域网 IP 往往不通（OPS §2.5）。
+    """
+    print("\n租户 runtime 容器内的后端可达性")
+    url = f"{market_url.rstrip('/')}/health"
+    if not container:
+        report(False, "未提供 --runtime-container", "容器视角的地址未校验", warn=True)
+        return
+    probes = [
+        ["python3", "-c", f"import urllib.request;print(urllib.request.urlopen({url!r},timeout=8).status)"],
+        ["python", "-c", f"import urllib.request;print(urllib.request.urlopen({url!r},timeout=8).status)"],
+        ["curl", "-sS", "-m", "8", "-o", "/dev/null", "-w", "%{http_code}", url],
+    ]
+    output = ""
+    for probe in probes:
+        try:
+            completed = subprocess.run(
+                ["docker", "exec", container, *probe],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=60,
+            )
+        except Exception as exc:  # noqa: BLE001
+            report(False, f"docker exec {container}", str(exc), warn=True)
+            return
+        output = ((completed.stdout or "") + (completed.stderr or "")).strip()
+        if completed.returncode == 0 and "200" in output:
+            break
+    if "200" in output:
+        report(True, f"容器内 GET {url}")
+    else:
+        report(False, f"容器内 GET {url}", output[:200] or "无输出")
+        print("        修复：换成容器视角可达的地址（host.docker.internal / 同网络容器名），"
+              "并同步改后端 MARKET_PUBLIC_URL（见 OPS §2.5）")
 
 
 def check_app(app_url: str) -> None:
@@ -147,17 +253,28 @@ def main() -> int:
     parser.add_argument("--admin-password", default=os.environ.get("ADMIN_PASSWORD", ""))
     parser.add_argument("--app-url", help="QwenPaw 控制台地址（可选）")
     parser.add_argument("--runtimes-dir", help="hub runtimes 目录（可选）")
+    parser.add_argument(
+        "--public-url",
+        help="后端的 MARKET_PUBLIC_URL（默认同 --market-url）：runtime 必须与它逐字符相同",
+    )
+    parser.add_argument(
+        "--runtime-container",
+        help="租户 runtime 的容器名（可选）：从容器内部探一次后端可达性",
+    )
     parser.add_argument("--qwenpaw", help="qwenpaw 可执行文件路径（可选）")
     args = parser.parse_args()
 
+    public_url = (args.public_url or args.market_url).rstrip("/")
     print("离线技能市场 preflight")
     check_market(args.market_url, args.admin, args.admin_password)
+    check_public_url(args.market_url, public_url)
+    configs: list[Path] = []
     if args.runtimes_dir:
         root = Path(args.runtimes_dir)
         configs = sorted(root.rglob("config.json")) if root.is_dir() else []
-        check_scan_dirs(configs)
-    else:
-        check_scan_dirs([])
+    check_scan_dirs(configs)
+    runtime_url = check_runtime_urls(public_url, configs)
+    check_runtime_container(args.runtime_container, runtime_url or public_url)
     if args.app_url:
         check_app(args.app_url)
     if args.qwenpaw:

@@ -43,8 +43,12 @@ def urllib_transport(
             return response.status, response.read()
     except urllib.error.HTTPError as exc:  # 4xx/5xx still carry a JSON body
         return exc.code, exc.read()
-    except urllib.error.URLError as exc:
-        raise BackendError(0, "unreachable", f"市场后端不可达：{exc.reason}") from exc
+    except urllib.error.URLError as exc:  # connect refused / DNS / connect timeout
+        raise BackendError(0, "unreachable", f"市场后端不可达（{url}）：{exc.reason}") from exc
+    except TimeoutError as exc:  # read timeout: urllib does not wrap it
+        raise BackendError(0, "timeout", f"市场后端超时（{url}）：{exc}") from exc
+    except OSError as exc:
+        raise BackendError(0, "unreachable", f"市场后端不可达（{url}）：{exc}") from exc
 
 
 class BackendClient:

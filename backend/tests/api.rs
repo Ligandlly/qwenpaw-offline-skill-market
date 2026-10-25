@@ -26,11 +26,11 @@ fn test_config() -> Config {
         public_url: "http://market.test".into(),
         admin_user: "admin".into(),
         admin_password: "s3cret-pw".into(),
+        log_level: "warn".into(),
         limits: Limits {
             max_bundle_bytes: 2 * 1024 * 1024,
             max_files: 100,
             max_file_bytes: 256 * 1024,
-            max_path_depth: 3,
         },
     }
 }
@@ -217,6 +217,28 @@ async fn private_skills_are_fail_closed() {
         )
         .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn deep_paths_publish_without_a_depth_gate() {
+    let h = Harness::new();
+    let (status, body, _) = h
+        .call(
+            "POST",
+            "/api/v1/skills",
+            Some("tenant-a"),
+            Some(json!({
+                "name": "deep", "slug": "deep", "version": "1.0.0", "visibility": "public",
+                "files": {
+                    "SKILL.md": GOOD_MANIFEST,
+                    "scripts/office/helpers/__init__.py": "",
+                }
+            })),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(body["file_count"], 2);
 }
 
 #[tokio::test]

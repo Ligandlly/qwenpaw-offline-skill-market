@@ -61,11 +61,11 @@ class OfflineMarketProvider:
     def _client(self) -> BackendClient:
         url = self.settings.market_url
         tenant = self.settings.tenant
-        if not url or not tenant:
+        if not tenant:
             raise BackendError(
                 0,
                 "not_configured",
-                "离线技能市场未配置：需要 OFFLINE_MARKET_URL 与 QWENPAW_TENANT_ID",
+                "离线技能市场未配置：需要 QWENPAW_TENANT_ID",
             )
         return BackendClient(url, tenant, timeout=self.settings.timeout)
 

@@ -69,7 +69,7 @@ pub fn check_bundle(
 
     let mut size_bytes = 0usize;
     for (path, content) in files {
-        check_path(path, limits)?;
+        check_path(path)?;
         let n = content.len();
         if n > limits.max_file_bytes {
             return Err(Reject::new(
@@ -104,7 +104,7 @@ pub fn check_bundle(
     })
 }
 
-fn check_path(path: &str, limits: &Limits) -> Result<(), Reject> {
+fn check_path(path: &str) -> Result<(), Reject> {
     if path.is_empty() || path.len() > 200 {
         return Err(Reject::new("invalid_path", format!("bad path {:?}", path)));
     }
@@ -126,24 +126,13 @@ fn check_path(path: &str, limits: &Limits) -> Result<(), Reject> {
             format!("{path}: use forward slashes"),
         ));
     }
-    let segments: Vec<&str> = path.split('/').collect();
-    for seg in &segments {
-        if seg.is_empty() || *seg == "." || *seg == ".." {
+    for seg in path.split('/') {
+        if seg.is_empty() || seg == "." || seg == ".." {
             return Err(Reject::new(
                 "traversal",
                 format!("{path}: empty, '.' or '..' segments are not allowed"),
             ));
         }
-    }
-    if segments.len() > limits.max_path_depth {
-        return Err(Reject::new(
-            "path_too_deep",
-            format!(
-                "{path}: depth {} exceeds limit {}",
-                segments.len(),
-                limits.max_path_depth
-            ),
-        ));
     }
     Ok(())
 }
@@ -255,7 +244,6 @@ mod tests {
             max_bundle_bytes: 2 * 1024 * 1024,
             max_files: 3,
             max_file_bytes: 256 * 1024,
-            max_path_depth: 3,
         }
     }
 
@@ -335,13 +323,18 @@ mod tests {
     }
 
     #[test]
-    fn enforces_depth_count_and_sizes() {
-        let deep = bundle(&[(MANIFEST, GOOD_MANIFEST), ("a/b/c/d.md", "x")]);
-        assert_eq!(
-            check_bundle("d", &deep, &limits()).unwrap_err().code,
-            "path_too_deep"
-        );
+    fn accepts_deeply_nested_paths() {
+        // Real skills have this shape (spikes: scripts/office/helpers/__init__.py);
+        // only the 200-char path cap bounds the depth now.
+        let deep = bundle(&[
+            (MANIFEST, GOOD_MANIFEST),
+            ("scripts/office/helpers/__init__.py", ""),
+        ]);
+        assert_eq!(check_bundle("d", &deep, &limits()).unwrap().files.len(), 2);
+    }
 
+    #[test]
+    fn enforces_count_and_sizes() {
         let many = bundle(&[
             (MANIFEST, GOOD_MANIFEST),
             ("a.md", "x"),

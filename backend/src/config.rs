@@ -9,6 +9,7 @@ pub struct Config {
     pub public_url: String,
     pub admin_user: String,
     pub admin_password: String,
+    pub log_level: String,
     pub limits: Limits,
 }
 
@@ -17,7 +18,6 @@ pub struct Limits {
     pub max_bundle_bytes: usize,
     pub max_files: usize,
     pub max_file_bytes: usize,
-    pub max_path_depth: usize,
 }
 
 impl Limits {
@@ -26,7 +26,6 @@ impl Limits {
             max_bundle_bytes: num("MARKET_MAX_BUNDLE_BYTES", 2 * 1024 * 1024),
             max_files: num("MARKET_MAX_FILES", 100),
             max_file_bytes: num("MARKET_MAX_FILE_BYTES", 256 * 1024),
-            max_path_depth: num("MARKET_MAX_PATH_DEPTH", 3),
         }
     }
 }
@@ -44,6 +43,7 @@ impl Config {
                 .to_string(),
             admin_user: std::env::var("ADMIN_USER").unwrap_or_else(|_| "admin".into()),
             admin_password: std::env::var("ADMIN_PASSWORD").unwrap_or_default(),
+            log_level: std::env::var("MARKET_LOG").unwrap_or_else(|_| "info".into()),
             limits: Limits::from_env(),
         }
     }

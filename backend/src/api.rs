@@ -9,6 +9,7 @@ use rusqlite::{params, Row};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
+use tracing::{debug, error, info, warn};
 
 use crate::auth::TenantId;
 use crate::db::{audit, now};
@@ -38,6 +39,7 @@ impl ApiError {
     }
 
     fn db(err: rusqlite::Error) -> Self {
+        error!(error = %err, "database error");
         Self::new(
             StatusCode::INTERNAL_SERVER_ERROR,
             "db_error",
@@ -146,7 +148,6 @@ pub async fn get_limits(State(app): State<Shared>) -> Json<Value> {
         "max_bundle_bytes": l.max_bundle_bytes,
         "max_files": l.max_files,
         "max_file_bytes": l.max_file_bytes,
-        "max_path_depth": l.max_path_depth,
         "manifest": MANIFEST,
     }))
 }
@@ -186,6 +187,14 @@ pub async fn list_skills(
         .collect::<rusqlite::Result<Vec<_>>>()
         .map_err(ApiError::db)?;
 
+    debug!(
+        tenant = %tenant.0,
+        q = %q.q,
+        page = q.page,
+        limit,
+        items = rows.len(),
+        "market listing"
+    );
     Ok(Json(
         json!({ "page": q.page.max(1), "limit": limit, "items": rows }),
     ))
@@ -203,6 +212,7 @@ pub async fn list_mine(State(app): State<Shared>, tenant: TenantId) -> ApiResult
         .map_err(ApiError::db)?
         .collect::<rusqlite::Result<Vec<_>>>()
         .map_err(ApiError::db)?;
+    debug!(tenant = %tenant.0, items = rows.len(), "own skills");
     Ok(Json(json!({ "items": rows })))
 }
 
@@ -222,11 +232,19 @@ pub async fn skill_status(
         .map_err(ApiError::db)?;
     let mut rows = stmt.query(params![slug]).map_err(ApiError::db)?;
     let Some(row) = rows.next().map_err(ApiError::db)? else {
+        debug!(tenant = %tenant.0, slug = %slug, "status: unknown skill");
         return Err(ApiError::not_found("unknown skill"));
     };
     let owner: String = row.get("owner_tenant").map_err(ApiError::db)?;
     let visibility: String = row.get("visibility").map_err(ApiError::db)?;
     if owner != tenant.0 && visibility != "public" {
+        debug!(
+            tenant = %tenant.0,
+            slug = %slug,
+            owner = %owner,
+            visibility = %visibility,
+            "status: not visible to tenant"
+        );
         return Err(ApiError::not_found("unknown skill"));
     }
     let withdrawn_at: Option<i64> = row.get("withdrawn_at").map_err(ApiError::db)?;
@@ -238,6 +256,7 @@ pub async fn skill_status(
     } else {
         "active"
     };
+    debug!(tenant = %tenant.0, slug = %slug, state = %state, "status");
     Ok(Json(json!({
         "slug": row.get::<_, String>("slug").map_err(ApiError::db)?,
         "name": row.get::<_, String>("name").map_err(ApiError::db)?,
@@ -338,6 +357,12 @@ pub async fn lookup_skills(
         .collect::<rusqlite::Result<Vec<_>>>()
         .map_err(ApiError::db)?;
 
+    debug!(
+        tenant = %tenant.0,
+        wanted = wanted.len(),
+        found = items.len(),
+        "lookup"
+    );
     Ok(Json(json!({ "items": items })))
 }
 
@@ -384,7 +409,20 @@ pub async fn publish(
         ));
     }
 
-    let checked = limits::check_bundle(&body.name, &body.files, &app.cfg.limits)?;
+    let checked = match limits::check_bundle(&body.name, &body.files, &app.cfg.limits) {
+        Ok(checked) => checked,
+        Err(reject) => {
+            warn!(
+                tenant = %tenant.0,
+                slug = %slug,
+                version = %body.version,
+                code = reject.code,
+                reason = %reject.message,
+                "publish rejected by gate"
+            );
+            return Err(reject.into());
+        }
+    };
 
     let db = app.db();
     let actor = tenant.actor();
@@ -404,11 +442,22 @@ pub async fn publish(
         .ok();
     if let Some((owner, takedown_at)) = &existing {
         if owner != &tenant.0 {
+            warn!(
+                tenant = %tenant.0,
+                slug = %slug,
+                owner = %owner,
+                "publish rejected: slug belongs to another tenant"
+            );
             return Err(ApiError::forbidden(format!(
                 "slug '{slug}' already belongs to another tenant"
             )));
         }
         if takedown_at.is_some() {
+            warn!(
+                tenant = %tenant.0,
+                slug = %slug,
+                "publish rejected: skill is taken down"
+            );
             return Err(ApiError::conflict(
                 "taken_down",
                 "this skill was taken down by an administrator; publishing is blocked",
@@ -451,6 +500,12 @@ pub async fn publish(
         Err(err) => return Err(ApiError::db(err)),
     };
     if inserted == 0 {
+        warn!(
+            tenant = %tenant.0,
+            slug = %slug,
+            version = %body.version,
+            "publish rejected: version already exists"
+        );
         return Err(ApiError::conflict(
             "version_exists",
             format!("version {} already exists and is immutable", body.version),
@@ -500,6 +555,17 @@ pub async fn publish(
     .map_err(ApiError::db)?;
     tx.commit().map_err(ApiError::db)?;
 
+    info!(
+        tenant = %tenant.0,
+        slug = %slug,
+        version = %body.version,
+        visibility = %body.visibility,
+        files = checked.files.len(),
+        bytes = checked.size_bytes,
+        sha256 = %checked.sha256,
+        latest = advance,
+        "published"
+    );
     Ok((
         StatusCode::CREATED,
         Json(json!({
@@ -537,9 +603,15 @@ pub async fn withdraw(
         )
         .map_err(|_| ApiError::not_found("unknown skill"))?;
     if owner != tenant.0 {
+        warn!(tenant = %tenant.0, slug = %slug, "withdraw rejected: not the owner");
         return Err(ApiError::forbidden("only the owning tenant may withdraw"));
     }
     if takedown_at.is_some() {
+        warn!(
+            tenant = %tenant.0,
+            slug = %slug,
+            "withdraw rejected: skill is taken down"
+        );
         return Err(ApiError::conflict(
             "taken_down",
             "already taken down by an administrator",
@@ -550,6 +622,12 @@ pub async fn withdraw(
         params![slug, now(), tenant.0],
     )
     .map_err(ApiError::db)?;
+    info!(
+        tenant = %tenant.0,
+        slug = %slug,
+        reason = reason.as_deref().unwrap_or("-"),
+        "withdrawn"
+    );
     audit(
         db_ref(&db),
         &tenant.actor(),
@@ -577,9 +655,19 @@ pub async fn restore(
         )
         .map_err(|_| ApiError::not_found("unknown skill"))?;
     if owner != tenant.0 {
+        warn!(
+            tenant = %tenant.0,
+            slug = %slug,
+            "restore rejected: not the owner"
+        );
         return Err(ApiError::forbidden("only the owning tenant may restore"));
     }
     if takedown_at.is_some() {
+        warn!(
+            tenant = %tenant.0,
+            slug = %slug,
+            "restore rejected: skill is taken down"
+        );
         return Err(ApiError::conflict(
             "taken_down",
             "an administrator took this skill down; it cannot be self-restored",
@@ -590,6 +678,7 @@ pub async fn restore(
         params![slug],
     )
     .map_err(ApiError::db)?;
+    info!(tenant = %tenant.0, slug = %slug, "restored");
     audit(
         db_ref(&db),
         &tenant.actor(),
@@ -634,6 +723,11 @@ pub async fn fetch_bundle(
         .map_err(|_| ApiError::new(StatusCode::GONE, "gone", "unknown skill"))?;
 
     if takedown_at.is_some() {
+        debug!(
+            tenant = %tenant.0,
+            slug = %slug,
+            "bundle fetch: taken down"
+        );
         return Err(ApiError::new(
             StatusCode::GONE,
             "taken_down",
@@ -642,6 +736,11 @@ pub async fn fetch_bundle(
     }
     let is_owner = owner == tenant.0;
     if withdrawn_at.is_some() && !is_owner {
+        debug!(
+            tenant = %tenant.0,
+            slug = %slug,
+            "bundle fetch: withdrawn"
+        );
         return Err(ApiError::new(
             StatusCode::GONE,
             "withdrawn",
@@ -649,6 +748,12 @@ pub async fn fetch_bundle(
         ));
     }
     if visibility != "public" && !is_owner {
+        debug!(
+            tenant = %tenant.0,
+            slug = %slug,
+            visibility = %visibility,
+            "bundle fetch: private skill"
+        );
         return Err(ApiError::forbidden("this skill is private to its tenant"));
     }
 
@@ -676,6 +781,14 @@ pub async fn fetch_bundle(
         )
     })?;
 
+    debug!(
+        tenant = %tenant.0,
+        slug = %slug,
+        version = %resolved,
+        files = files.len(),
+        bytes = files.values().map(|content| content.len()).sum::<usize>(),
+        "bundle fetched"
+    );
     Ok(Json(json!({
         "name": name,
         "version": resolved,

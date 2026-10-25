@@ -15,6 +15,12 @@ venv/
 # rust (backend project)
 target/
 
+# per-host deployment secrets (.env holds ADMIN_PASSWORD)
+.env
+
+# local code index (codegraph)
+.codegraph/
+
 # local data
 data/
 *.sqlite

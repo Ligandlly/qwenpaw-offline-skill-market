@@ -15,7 +15,22 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 VALID_SCAN_MODES = {"block", "warn", "off"}
-REQUIRED_SCAN_MODE = "block"
+
+# `block` stops an install; `warn` scans and logs but installs anyway — both mean
+# the scanner actually looked at the skill. `off` scans nothing, which is the
+# only mode this market refuses to distribute under.
+ACCEPTED_SCAN_MODES = frozenset({"block", "warn"})
+
+# Mode assumed when config.json is missing or says something unreadable.
+ASSUMED_SCAN_MODE = "block"
+
+# Not a real QwenPaw mode: we could not read the config at all.
+UNKNOWN_MODE = "unknown"
+
+# Where the market backend lives when neither the plugin config nor the env
+# says otherwise: the single-machine default, which is also what
+# deploy/docker-compose.yml publishes.
+DEFAULT_MARKET_URL = "http://localhost:8080"
 
 # Scan-mode config is re-read at most this often (seconds). Editing
 # config.json or the env is an operator action, not a hot loop.
@@ -47,13 +62,20 @@ class ScanGate:
 
     @property
     def ok(self) -> bool:
-        return self.mode == REQUIRED_SCAN_MODE
+        return self.mode in ACCEPTED_SCAN_MODES
 
     def reason(self) -> str:
+        if self.mode == UNKNOWN_MODE:
+            return (
+                f"技能市场已暂停分发：读不到 QwenPaw 扫描配置（{self.detail}）。"
+                "无法确认扫描处于开启状态，因此本市场拒绝服务。"
+                "修复：为该 runtime 设置 QWENPAW_SKILL_SCAN_MODE=block 后重启。"
+            )
         return (
-            "技能市场已暂停分发：QwenPaw 技能扫描未处于 block 模式"
+            "技能市场已暂停分发：QwenPaw 技能扫描被关闭"
             f"（当前 {self.mode}，来源 {self.source}）。"
-            "默认的 warn 模式只会记录告警并照常安装，因此本市场拒绝服务。"
+            "off 模式不扫描技能内容，任何东西都能被装进 runtime，"
+            "因此本市场只在 block（拦截）或 warn（扫描后告警）下分发。"
             "修复：为该 runtime 设置 QWENPAW_SKILL_SCAN_MODE=block 后重启。"
         )
 
@@ -70,16 +92,16 @@ def resolve_scan_gate(config_path: Path | None = None) -> ScanGate:
         raw = (
             payload.get("security", {})
             .get("skill_scanner", {})
-            .get("mode", REQUIRED_SCAN_MODE)
+            .get("mode", ASSUMED_SCAN_MODE)
         )
         mode = str(raw).lower().strip()
         if mode in VALID_SCAN_MODES:
             return ScanGate(mode, "config", str(path))
-        return ScanGate(REQUIRED_SCAN_MODE, "default", f"{path}: invalid mode {raw!r}")
+        return ScanGate(ASSUMED_SCAN_MODE, "default", f"{path}: invalid mode {raw!r}")
     except FileNotFoundError:
-        return ScanGate(REQUIRED_SCAN_MODE, "default", f"{path} missing")
-    except Exception as exc:  # pragma: no cover - unreadable config is rare
-        return ScanGate("warn", "unknown", f"cannot read {path}: {exc}")
+        return ScanGate(ASSUMED_SCAN_MODE, "default", f"{path} missing")
+    except Exception as exc:  # unreadable config: we cannot tell, so refuse
+        return ScanGate(UNKNOWN_MODE, "unknown", f"cannot read {path}: {exc}")
 
 
 @dataclass
@@ -89,12 +111,12 @@ class PluginSettings:
 
     # ---- resolved lazily; env can change only on restart anyway ----
     @property
-    def market_url(self) -> str | None:
+    def market_url(self) -> str:
         raw = _first(
             str(self.plugin_config.get("market_url") or ""),
             os.environ.get("OFFLINE_MARKET_URL"),
-        )
-        return raw.rstrip("/") if raw else None
+        ) or DEFAULT_MARKET_URL
+        return raw.rstrip("/")
 
     @property
     def tenant(self) -> str | None:
@@ -125,12 +147,6 @@ class PluginSettings:
     def problems(self) -> list[str]:
         """Reasons this market cannot serve, most fundamental first."""
         out: list[str] = []
-        if not self.market_url:
-            out.append(
-                "未配置市场后端地址：请在插件配置里填写 market_url，"
-                "或为该 runtime 设置 OFFLINE_MARKET_URL"
-            )
-            return out
         gate = self.scan_gate()
         if not gate.ok:
             out.append(gate.reason())

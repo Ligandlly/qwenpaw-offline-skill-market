@@ -1,0 +1,119 @@
+name: backend-image
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+    paths:
+      - "backend/**"
+      - ".github/workflows/backend-image.yml"
+  pull_request:
+    paths:
+      - "backend/**"
+      - ".github/workflows/backend-image.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: backend-image-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  image:
+    name: build image (linux/amd64) → ghcr + artifact
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # 把镜像 tarball 挂到 GitHub Release（仅 tag）
+      packages: write # 推 ghcr
+    steps:
+      - uses: actions/checkout@v4
+
+      # 先跑一遍测试：只有测试过的代码才配出镜像
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: backend
+
+      - name: cargo test
+        working-directory: backend
+        run: cargo test --all-targets --locked
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: 登录 ghcr
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          # latest 由 auto flavor 生成（默认分支 / semver tag），别再手写一条 raw，否则重复
+          flavor: latest=auto
+          tags: |
+            type=ref,event=branch
+            type=ref,event=tag
+            type=semver,pattern={{version}}
+            type=sha,format=long
+
+      - name: 构建并推送镜像
+        uses: docker/build-push-action@v6
+        with:
+          context: backend
+          file: backend/Dockerfile
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          platforms: linux/amd64
+          # 旧版 docker 不认 attestation manifest，关掉省事
+          provenance: false
+          sbom: false
+          cache-from: type=gha,scope=backend-image
+          cache-to: type=gha,mode=max,scope=backend-image,ignore-error=true
+
+      # 离线机器用不上 ghcr，所以再导一份能直接 docker load 的 tarball
+      - name: 导出镜像 tarball
+        if: github.event_name != 'pull_request'
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          set -euo pipefail
+          version="$(grep -m1 '^version' backend/Cargo.toml | sed -E 's/.*"(.*)".*/\1/')"
+          # metadata-action 的第一个 tag 就是 ref（分支名或 tag 名），已做过合法化
+          primary="$(printf '%s\n' "$TAGS" | head -n1)"
+          echo "导出 $primary（version $version）"
+          docker pull --platform linux/amd64 "$primary"
+          docker save -o "offline-market-image-${version}-linux-amd64.tar" "$primary"
+          sha256sum "offline-market-image-${version}-linux-amd64.tar" \
+            > "offline-market-image-${version}-linux-amd64.tar.sha256"
+          ls -lh offline-market-image-*
+
+      - name: 上传 artifact
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: offline-market-image-linux-amd64
+          path: |
+            offline-market-image-*-linux-amd64.tar
+            offline-market-image-*-linux-amd64.tar.sha256
+          retention-days: 14
+
+      - name: 挂到 GitHub Release（仅 tag）
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            offline-market-image-*-linux-amd64.tar
+            offline-market-image-*-linux-amd64.tar.sha256
+          generate_release_notes: false

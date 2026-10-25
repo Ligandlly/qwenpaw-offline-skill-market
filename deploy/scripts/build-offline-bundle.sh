@@ -48,15 +48,16 @@ cat > "$stage/README.txt" <<'TXT'
 
 最短路径
   1) 起后端
-       cp deploy/.env.example .env && vi .env      # 改 ADMIN_PASSWORD 与 MARKET_PUBLIC_URL
-       docker compose --env-file .env -f deploy/docker-compose.yml up -d
+       cp deploy/.env.example deploy/.env && vi deploy/.env   # 改 ADMIN_PASSWORD 与 MARKET_PUBLIC_URL
+       docker compose -f deploy/docker-compose.yml up -d      # .env 必须与 compose 文件同目录
      或者裸二进制：见 deploy/systemd/offline-market.service
   2) 每个租户 runtime 强制技能扫描为 block
        python3 deploy/scripts/enforce-scan-mode.py --runtimes-dir <hub runtimes> --dry-run
        python3 deploy/scripts/enforce-scan-mode.py --runtimes-dir <hub runtimes>
   3) 装插件并配置市场地址
        qwenpaw plugin install ./plugin
-       # 市场地址走 hub 的 credentials 注入（QWENPAW_* 前缀无法注入，见 OPS.md）
+       # 市场地址走 hub 的 credentials 注入 OFFLINE_MARKET_URL（QWENPAW_* 前缀无法注入），
+       # 且必须与后端的 MARKET_PUBLIC_URL 逐字符相同（见 docs/OPS.md §2.1）
   4) 验收
        python3 deploy/scripts/e2e.py --binary bin/offline-market-backend
        python3 deploy/scripts/e2e.py --skip-a --app-url http://<qwenpaw> --market-url http://<market> --tenant <租户>

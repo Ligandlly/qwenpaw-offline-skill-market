@@ -28,13 +28,21 @@ def test_available_when_everything_is_configured(env):
     assert prov.available() == (True, None)
 
 
-def test_available_false_when_scan_mode_is_warn(env, tmp_path):
+def test_available_false_when_scan_mode_is_off(env, tmp_path):
+    env.delenv("QWENPAW_SKILL_SCAN_MODE")
+    cfg = tmp_path / "config.json"
+    cfg.write_text('{"security":{"skill_scanner":{"mode":"off"}}}', encoding="utf-8")
+    prov = OfflineMarketProvider(PluginSettings(config_path=cfg))
+    ok, reason = prov.available()
+    assert ok is False and "off" in reason
+
+
+def test_available_when_scan_mode_is_warn(env, tmp_path):
     env.delenv("QWENPAW_SKILL_SCAN_MODE")
     cfg = tmp_path / "config.json"
     cfg.write_text('{"security":{"skill_scanner":{"mode":"warn"}}}', encoding="utf-8")
     prov = OfflineMarketProvider(PluginSettings(config_path=cfg))
-    ok, reason = prov.available()
-    assert ok is False and "block" in reason
+    assert prov.available() == (True, None)
 
 
 def test_available_false_without_tenant(env):

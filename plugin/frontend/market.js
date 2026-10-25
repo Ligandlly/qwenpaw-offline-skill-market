@@ -39,17 +39,67 @@ function apiUrl(path) {
   return `/api${path.startsWith("/") ? path : `/${path}`}`;
 }
 
+// The console always sends the selected agent; without it the host falls back
+// to `agents.active_agent` and may cold-start a different workspace, which is
+// where `/api/skills*` calls can sit for a long time.
+function selectedAgentId() {
+  const host = window.QwenPaw && window.QwenPaw.host;
+  if (host && typeof host.getSelectedAgentId === "function") {
+    try {
+      const value = host.getSelectedAgentId();
+      if (value) return value;
+    } catch (err) {
+      // fall through to storage
+    }
+  }
+  try {
+    const raw =
+      sessionStorage.getItem("qwenpaw-agent-storage") ||
+      localStorage.getItem("qwenpaw-agent-storage");
+    if (raw) {
+      const stored = JSON.parse(raw);
+      const value = stored && stored.state && stored.state.selectedAgent;
+      if (value) return value;
+    }
+    return localStorage.getItem("qwenpaw-last-used-agent") || "";
+  } catch (err) {
+    return "";
+  }
+}
+
+// A fetch without a deadline can outlive the page: behind the hub proxy a
+// stalled response never settles, and the caller keeps its spinner forever.
+const REQUEST_TIMEOUT_MS = 15000;
+
 async function request(path, init) {
   const host = window.QwenPaw && window.QwenPaw.host;
   const token = host && typeof host.getApiToken === "function" ? host.getApiToken() : "";
   const headers = { accept: "application/json", ...((init && init.headers) || {}) };
   if (token) headers.Authorization = `Bearer ${token}`;
-  const response = await fetch(apiUrl(path), {
-    credentials: "same-origin",
-    ...init,
-    headers,
-  });
-  const text = await response.text();
+  const agent = selectedAgentId();
+  if (agent) headers["X-Agent-Id"] = agent;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  let response;
+  let text;
+  try {
+    response = await fetch(apiUrl(path), {
+      credentials: "same-origin",
+      ...init,
+      headers,
+      signal: controller.signal,
+    });
+    // read the body under the same deadline: a body that stops mid-stream would
+    // otherwise hang here with the abort timer already cleared
+    text = await response.text();
+  } catch (err) {
+    if (err && err.name === "AbortError") {
+      throw new Error(`请求超时（${REQUEST_TIMEOUT_MS / 1000}s）：${path}`);
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
   let body = {};
   try {
     body = text ? JSON.parse(text) : {};
@@ -74,33 +124,23 @@ const postJson = (path, payload) =>
     body: JSON.stringify(payload || {}),
   });
 
-function readFileAsText(file) {
+function readFileAsBytes(file) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
-    reader.onload = () => resolve(String(reader.result || ""));
+    reader.onload = () => resolve(reader.result);
     reader.onerror = () => reject(new Error(`无法读取 ${file.name}`));
-    reader.readAsText(file);
+    reader.readAsArrayBuffer(file);
   });
 }
 
 /** Cheap client-side mirror of the backend gate; the backend still decides. */
-function precheck(files, limits) {
-  const paths = Object.keys(files);
-  if (!paths.length) return "请至少添加一个文件";
-  if (!paths.includes("SKILL.md")) return "根目录必须有 SKILL.md";
-  if (limits) {
-    if (paths.length > limits.max_files) return `文件数超过上限 ${limits.max_files}`;
-    let total = 0;
-    for (const path of paths) {
-      const size = new Blob([files[path]]).size;
-      if (size > limits.max_file_bytes) return `${path} 超过单文件上限 ${limits.max_file_bytes} 字节`;
-      if (path.split("/").length > limits.max_path_depth) return `${path} 层级超过 ${limits.max_path_depth}`;
-      if (path.startsWith("/") || path.split("/").some((seg) => !seg || seg === "." || seg === ".."))
-        return `${path} 路径不合法`;
-      total += size;
-    }
-    if (total > limits.max_bundle_bytes) return `总大小超过上限 ${limits.max_bundle_bytes} 字节`;
-  }
+function precheckArchive(archive, limits) {
+  if (!archive) return "请选择技能压缩包（.zip）";
+  if (!/\.zip$/i.test(archive.name)) return "只支持 .zip 压缩包";
+  // Zip headers add a little overhead on top of the bundle itself; the backend
+  // checks the real file count and uncompressed sizes.
+  if (limits && archive.bytes.byteLength > limits.max_bundle_bytes + 1024 * 1024)
+    return `压缩包超过后端总大小上限 ${limits.max_bundle_bytes} 字节`;
   return null;
 }
 
@@ -248,7 +288,7 @@ whenHost((paw) => {
 
   // ------------------------------------------------------------------ tabs ---
 
-  function MarketTab({ limits, onNotice }) {
+  function MarketTab({ limits, onNotice, refreshToken }) {
     const [items, setItems] = useState([]);
     const [query, setQuery] = useState("");
     const [loading, setLoading] = useState(false);
@@ -273,8 +313,11 @@ whenHost((paw) => {
     );
 
     useEffect(() => {
-      load("");
-    }, [load]);
+      // Mount, and once more after a successful publish (refreshToken), so the
+      // new version shows up without the user pressing 搜索 or 全部.
+      // `query` is deliberately not a dependency: typing must not refetch.
+      load(query);
+    }, [load, refreshToken]);
 
     const columns = useMemo(
       () => [
@@ -463,34 +506,26 @@ whenHost((paw) => {
     const [slug, setSlug] = useState("");
     const [version, setVersion] = useState("1.0.0");
     const [visibility, setVisibility] = useState("public");
-    const [files, setFiles] = useState({});
+    const [archive, setArchive] = useState(null);
     const [fileError, setFileError] = useState(null);
     const [busy, setBusy] = useState(false);
 
     const onPick = useCallback(async (event) => {
-      const picked = Array.from(event.target.files || []);
-      if (!picked.length) return;
-      const next = {};
-      const failures = [];
-      for (const file of picked) {
-        // webkitRelativePath keeps sub-directories when a folder is selected
-        const path = file.webkitRelativePath || file.name;
-        try {
-          next[path] = await readFileAsText(file);
-        } catch (err) {
-          failures.push(err.message);
-        }
-      }
-      setFiles(next);
-      setFileError(failures.length ? failures.join("；") : null);
-      if (!name && picked.length === 1) {
-        const base = (picked[0].name || "").replace(/\.md$/i, "");
-        if (base && base !== "SKILL") setName(base);
+      const picked = (event.target.files || [])[0];
+      event.target.value = ""; // allow picking the same file again
+      if (!picked) return;
+      try {
+        const bytes = await readFileAsBytes(picked);
+        setArchive({ name: picked.name, bytes });
+        setFileError(null);
+        if (!name) setName(picked.name.replace(/\.zip$/i, ""));
+      } catch (err) {
+        setFileError(err.message);
       }
     }, [name]);
 
     const submit = useCallback(async () => {
-      const problem = precheck(files, limits);
+      const problem = precheckArchive(archive, limits);
       if (problem) {
         setFileError(problem);
         return;
@@ -498,24 +533,30 @@ whenHost((paw) => {
       setBusy(true);
       setFileError(null);
       try {
-        const body = await postJson("/offline-market/skills", {
-          name: name.trim() || "untitled",
-          slug: slug.trim() || null,
+        const fallback = archive.name.replace(/\.zip$/i, "");
+        const params = new URLSearchParams({
+          name: name.trim() || fallback || "untitled",
           version: version.trim(),
           visibility,
-          files,
         });
-        onNotice({ type: "success", text: `已发布 ${body.slug}@${body.version}` });
-        setFiles({});
+        if (slug.trim()) params.set("slug", slug.trim());
+        const body = await request(`/offline-market/skills/zip?${params}`, {
+          method: "POST",
+          headers: { "content-type": "application/zip" },
+          body: archive.bytes,
+        });
+        onNotice({
+          type: "success",
+          text: `已发布 ${body.slug}@${body.version}（${body.file_count} 个文件）`,
+        });
+        setArchive(null);
         onPublished && onPublished();
       } catch (err) {
         setFileError(`${err.code ? `[${err.code}] ` : ""}${err.message}`);
       } finally {
         setBusy(false);
       }
-    }, [files, limits, name, slug, version, visibility, onNotice, onPublished]);
-
-    const fileKeys = Object.keys(files);
+    }, [archive, limits, name, slug, version, visibility, onNotice, onPublished]);
 
     return h(
       Card,
@@ -575,29 +616,26 @@ whenHost((paw) => {
           null,
           h("input", {
             type: "file",
-            multiple: true,
+            accept: ".zip,application/zip,application/x-zip-compressed",
             onChange: onPick,
             style: { color: "inherit" },
           }),
           h(
             Paragraph,
             { type: "secondary", style: { margin: "6px 0 0" } },
-            "选择技能目录里的文件（至少要包含根目录的 SKILL.md）；" +
+            "上传技能压缩包（.zip）：根目录（或压缩包里唯一的顶层目录）必须包含 SKILL.md；" +
               (limits
                 ? `后端限额：${limits.max_files} 个文件 / 单文件 ${limits.max_file_bytes} 字节 / 合计 ${limits.max_bundle_bytes} 字节。`
                 : "限额未取到，后端仍会校验。"),
           ),
         ),
-        fileKeys.length
+        archive
           ? h(
-              "div",
-              null,
-              h(Text, { strong: true }, `${fileKeys.length} 个文件：`),
-              h(
-                Space,
-                { wrap: true, size: 4 },
-                fileKeys.map((path) => h(Tag, { key: path }, path)),
-              ),
+              Space,
+              { wrap: true },
+              h(Text, { strong: true }, "已选择："),
+              h(Tag, null, archive.name),
+              h(Text, { type: "secondary" }, `${(archive.bytes.byteLength / 1024).toFixed(1)} KB`),
             )
           : null,
         fileError ? h(Alert, { type: "error", showIcon: true, message: fileError }) : null,
@@ -605,7 +643,7 @@ whenHost((paw) => {
           Space,
           null,
           h(Button, { type: "primary", loading: busy, onClick: submit }, "立即发布"),
-          h(Button, { onClick: () => setFiles({}) }, "清空文件"),
+          h(Button, { onClick: () => setArchive(null) }, "清空压缩包"),
         ),
       ),
       h(
@@ -622,33 +660,49 @@ whenHost((paw) => {
    * /skills/{name} 详情里的 `installed_from`。宿主的安装目录名是
    * 展示名（不是我们的 slug），所以再用市场列表建立 name -> slug 映射，
    * 才能查 /status 拿到已下架状态。
+   *
+   * 只在非 builtin 的技能里查详情：builtin 是宿主自带的，不可能来自本市场。
+   * 逐条详情在 hub 代理后面单条就要 2~3 秒，所以按批查并边查边渲染，
+   * 不再用一个大 Spin 等全部请求。
    */
+  const DETAIL_BATCH = 4;
+
   function InstalledTab({ onNotice, refreshToken }) {
     const [rows, setRows] = useState([]);
     const [loading, setLoading] = useState(false);
 
     const load = useCallback(async () => {
       setLoading(true);
+      setRows([]);
       try {
         const listed = await getJson("/skills");
         const skills = Array.isArray(listed) ? listed : listed.items || [];
 
-        const details = await Promise.all(
-          skills.map(async (item) => {
-            try {
-              return await getJson(`/skills/${encodeURIComponent(item.name)}`);
-            } catch (err) {
-              return null;
-            }
-          }),
-        );
-        const fromMarket = details.filter(
-          (detail) => detail && detail.installed_from === PLUGIN_ID,
-        );
-        if (!fromMarket.length) {
-          setRows([]);
-          return;
+        const candidates = skills.filter((item) => item.source !== "builtin");
+        if (!candidates.length) return;
+
+        const fromMarket = [];
+        for (let index = 0; index < candidates.length; index += DETAIL_BATCH) {
+          const batch = candidates.slice(index, index + DETAIL_BATCH);
+          const details = await Promise.all(
+            batch.map((item) =>
+              // one broken skill must not hide the rest of the list
+              getJson(`/skills/${encodeURIComponent(item.name)}`).catch(() => null),
+            ),
+          );
+          details.forEach((detail) => {
+            if (detail && detail.installed_from === PLUGIN_ID) fromMarket.push(detail);
+          });
+          setRows(
+            fromMarket.map((item) => ({
+              ...item,
+              market_slug: "",
+              market_state: "",
+              market_reason: null,
+            })),
+          );
         }
+        if (!fromMarket.length) return;
 
         // display name -> {slug, state}; the backend's lookup also returns
         // withdrawn and taken-down skills, which the market listing hides.
@@ -711,23 +765,26 @@ whenHost((paw) => {
           if (row.market_state === "withdrawn") return h(Tag, { color: "default" }, "发布者已撤回");
           if (row.market_state === "active") return h(Tag, { color: "green" }, "正常");
           if (row.market_state === "unknown") return h(Tag, null, "市场中已不存在");
+          if (!row.market_state) return h(Text, { type: "secondary" }, "查询中…");
           return h(Tag, null, "—");
         },
       },
     ];
 
-    return loading
-      ? h(Spin)
-      : Table
-        ? h(Table, {
-            rowKey: (row) => `${row.name}:${row.last_updated || ""}`,
-            size: "small",
-            pagination: false,
-            dataSource: rows,
-            columns,
-            locale: { emptyText: h(Empty, { description: "还没有从本市场安装过技能" }) },
-          })
-        : h("div", null, rows.length, " 个已安装");
+    // The table renders as data arrives; the spinner only covers the very first
+    // list call, never the whole detail fan-out.
+    if (loading && !rows.length) return h(Spin);
+    return Table
+      ? h(Table, {
+          rowKey: (row) => `${row.name}:${row.last_updated || ""}`,
+          size: "small",
+          loading,
+          pagination: false,
+          dataSource: rows,
+          columns,
+          locale: { emptyText: h(Empty, { description: "还没有从本市场安装过技能" }) },
+        })
+      : h("div", null, rows.length, " 个已安装");
   }
 
   // ------------------------------------------------------------------ page ---
@@ -736,6 +793,9 @@ whenHost((paw) => {
     const { config, limits, error, setError } = useMarketData();
     const [notice, setNotice] = useState(null);
     const [refreshToken, setRefreshToken] = useState(0);
+    // Bumped only by a publish: refreshes the market list once without the
+    // spinner flash that a tab switch would cause.
+    const [marketToken, setMarketToken] = useState(0);
 
     const onNotice = useCallback((value) => {
       setNotice(value);
@@ -744,13 +804,16 @@ whenHost((paw) => {
       }
     }, []);
 
-    const onPublished = useCallback(() => setRefreshToken((value) => value + 1), []);
+    const onPublished = useCallback(() => {
+      setRefreshToken((value) => value + 1);
+      setMarketToken((value) => value + 1);
+    }, []);
 
     const tabs = [
       {
         key: "market",
         label: "市场",
-        children: h(MarketTab, { limits, onNotice }),
+        children: h(MarketTab, { limits, onNotice, refreshToken: marketToken }),
       },
       {
         key: "publish",
@@ -781,10 +844,9 @@ whenHost((paw) => {
         ? h(Tabs, {
             items: tabs,
             defaultActiveKey: "market",
-            onChange: () => {
-              setError(null);
-              setRefreshToken((value) => value + 1);
-            },
+            // A tab switch must not refetch: the pane mounts on first visit and
+            // refreshing here used to run the whole N+1 fan-out twice.
+            onChange: () => setError(null),
           })
         : h("div", null, tabs.map((tab) => h("section", { key: tab.key }, tab.children))),
     );

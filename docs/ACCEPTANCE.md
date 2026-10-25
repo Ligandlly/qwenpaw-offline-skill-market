@@ -36,7 +36,7 @@ python3 deploy/scripts/e2e.py --skip-a \
 覆盖 6 项：provider 已加载、provider 可用、宿主搜索命中、宿主安装任务完成且
 `installed_from: offline-market`、下架后搜索消失、下架后重装失败。
 
-前置：该 app 的 runtime 已设 `OFFLINE_MARKET_URL` 与扫描 `block`，插件已 `plugin install`。
+前置：该 app 的 runtime 已能解析市场地址（默认 `http://localhost:8080`）且扫描模式不是 `off`，插件已 `plugin install`。
 
 ## 4. 浏览器端到端（UI）
 
@@ -45,7 +45,7 @@ python3 deploy/scripts/e2e.py --skip-a \
 python3 spikes/m3_verify.py
 ```
 
-覆盖 8 项：侧边栏入口（名称/位置）、四个页签、UI 点安装到完成、UI 上传发布、
+覆盖 8 项：侧边栏入口（名称/位置）、四个页签、UI 点安装到完成、UI 上传 zip 发布、
 我的发布、已安装显示"正常"、管理员下架后显示"已下架"、**0 console & page error**。
 
 ## 5. 部署自检（只读）
@@ -65,7 +65,7 @@ python3 deploy/scripts/preflight.py \
 - 多节点/水平扩展（SQLite 单机）。
 - 人工审核流程、智能体协同审核（PLAN 明示后续工作）。
 - 远程吊销已安装副本（PLAN 明示不做）。
-- 二进制文件发布（Web 端按文本上传）。
+- 二进制文件发布（后端 bundle 是文本；zip 上传中的非 UTF-8 文件会被拒绝）。
 
 ## 7. 回归清单（改代码后至少跑这些）
 

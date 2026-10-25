@@ -96,6 +96,9 @@ def phase_a(binary: str, workdir: str) -> dict:
     port = free_port()
     base = f"http://127.0.0.1:{port}"
     db = os.path.join(workdir, "audit.sqlite3")
+    # 后端日志写文件而不是 PIPE：没人读 PIPE 时，写满管道缓冲区后端会卡死
+    # （Windows 默认 4 KB，每条请求一行日志，phase A 二十来个请求就能写满）。
+    log_path = os.path.join(workdir, "backend.log")
     env = dict(os.environ)
     env.update(
         {
@@ -106,14 +109,12 @@ def phase_a(binary: str, workdir: str) -> dict:
             "ADMIN_PASSWORD": "e2e-password",
         }
     )
+    log_file = open(log_path, "w", encoding="utf-8")
     process = subprocess.Popen(
         [binary],
         env=env,
-        stdout=subprocess.PIPE,
+        stdout=log_file,
         stderr=subprocess.STDOUT,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
     )
     try:
         if not check(wait_http(f"{base}/health"), "后端启动 /health"):
@@ -252,14 +253,13 @@ def phase_a(binary: str, workdir: str) -> dict:
         # 重启后数据仍在（SQLite 落盘）
         process.terminate()
         process.wait(timeout=15)
+        log_file.close()
+        log_file = open(log_path, "a", encoding="utf-8")
         process = subprocess.Popen(
             [binary],
             env=env,
-            stdout=subprocess.PIPE,
+            stdout=log_file,
             stderr=subprocess.STDOUT,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
         )
         if wait_http(f"{base}/health"):
             status, _, _ = http("GET", f"{base}/skills/{slug}/1.0.0", headers={"x-tenant-id": "t-b"})
@@ -272,6 +272,16 @@ def phase_a(binary: str, workdir: str) -> dict:
             process.wait(timeout=15)
         except subprocess.TimeoutExpired:  # pragma: no cover
             process.kill()
+        log_file.close()
+
+    if not all(ok for ok, _, _ in results):
+        print("  后端日志（末尾 40 行）：")
+        try:
+            with open(log_path, encoding="utf-8", errors="replace") as handle:
+                for line in handle.read().splitlines()[-40:]:
+                    print(f"    {line}")
+        except OSError:  # pragma: no cover
+            pass
 
     return {"ok": all(ok for ok, _, _ in results), "url": base, "audit_db": db}
 

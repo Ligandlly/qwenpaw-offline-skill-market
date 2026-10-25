@@ -4,7 +4,7 @@
 Covers the four tabs and the two write paths:
   1. sidebar entry: 技能市场（内网）, primary.agentScoped, right after core.marketplace
   2. 市场: table renders, 安装 drives the host install task to completion
-  3. 发布: upload SKILL.md + publish -> success notice
+  3. 发布: upload a skill .zip + publish -> success notice
   4. 我的发布: the new skill appears
   5. 已安装: shows 正常; after an admin takedown it shows 已下架
 
@@ -14,10 +14,12 @@ Run with backend :8099 and qwenpaw app :8123 up, plugin installed:
 
 from __future__ import annotations
 
+import io
 import json
 import sys
 import time
 import urllib.request
+import zipfile
 from pathlib import Path
 
 from playwright.sync_api import sync_playwright
@@ -27,6 +29,17 @@ MARKET = "http://127.0.0.1:8099"
 ADMIN = ("admin", "s3cret-pw")
 CHROMIUM = Path.home() / "AppData/Local/ms-playwright/chromium-1187/chrome-win/chrome.exe"
 SHOTS = Path(__file__).parent
+
+
+def skill_zip() -> bytes:
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr(
+            "SKILL.md",
+            "---\nname: e2e-published\ndescription: published from the browser\n---\n\n# E2E\n",
+        )
+        archive.writestr("scripts/hello.py", "print('hello')\n")
+    return buffer.getvalue()
 
 
 def http(method: str, url: str, body: dict | None = None, cookie: str = "", tenant: str = ""):
@@ -121,15 +134,11 @@ def main() -> int:
         page.get_by_placeholder("1.0.0").fill(f"0.2.{suffix}")
         page.set_input_files(
             "input[type=file]",
-            [
-                {
-                    "name": "SKILL.md",
-                    "mimeType": "text/markdown",
-                    "buffer": (
-                        "---\nname: e2e-published\ndescription: published from the browser\n---\n\n# E2E\n"
-                    ).encode(),
-                }
-            ],
+            {
+                "name": f"skill-{suffix}.zip",
+                "mimeType": "application/zip",
+                "buffer": skill_zip(),
+            },
         )
         page.wait_for_timeout(600)
         page.get_by_role("button", name="立即发布").click()

@@ -93,5 +93,14 @@ pub fn audit(
         "INSERT INTO audit_log (at, actor, action, slug, version, detail) VALUES (?1,?2,?3,?4,?5,?6)",
         rusqlite::params![now(), actor, action, slug, version, detail],
     )?;
+    let slug = slug.unwrap_or("-");
+    let version = version.unwrap_or("-");
+    tracing::debug!(
+        actor = %actor,
+        action = %action,
+        slug = %slug,
+        version = %version,
+        "audit"
+    );
     Ok(())
 }

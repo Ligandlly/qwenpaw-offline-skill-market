@@ -1,8 +1,11 @@
-use offline_market_backend::{admin, build_state, config::Config, db, router};
+use offline_market_backend::{admin, build_state, config::Config, db, log, router};
+use tracing::info;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cfg = Config::from_env();
+    log::init(&cfg.log_level);
+
     let conn = db::open(&cfg.db_path)?;
     let app = build_state(cfg.clone(), conn);
 
@@ -20,14 +23,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let listener = tokio::net::TcpListener::bind(&cfg.bind).await?;
-    println!("offline-market listening on http://{}", cfg.bind);
-    println!("  db: {}", cfg.db_path.display());
-    println!(
-        "  limits: bundle {} B / files {} / file {} B / depth {}",
-        cfg.limits.max_bundle_bytes,
-        cfg.limits.max_files,
-        cfg.limits.max_file_bytes,
-        cfg.limits.max_path_depth
+    info!(
+        bind = %cfg.bind,
+        db = %cfg.db_path.display(),
+        public_url = %cfg.public_url,
+        log_level = %cfg.log_level,
+        "offline-market listening"
+    );
+    info!(
+        max_bundle_bytes = cfg.limits.max_bundle_bytes,
+        max_files = cfg.limits.max_files,
+        max_file_bytes = cfg.limits.max_file_bytes,
+        "publish limits"
     );
     axum::serve(listener, router(app))
         .with_graceful_shutdown(shutdown())
@@ -37,5 +44,5 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 async fn shutdown() {
     let _ = tokio::signal::ctrl_c().await;
-    println!("\nshutting down");
+    info!("shutting down");
 }

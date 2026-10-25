@@ -13,6 +13,7 @@ pub mod auth;
 pub mod config;
 pub mod db;
 pub mod limits;
+pub mod log;
 pub mod state;
 
 use axum::routing::{get, post};
@@ -54,6 +55,7 @@ pub fn router(app: Shared) -> Router {
         .route("/admin/api/skills/{slug}/takedown", post(admin::takedown))
         .route("/admin/api/skills/{slug}/restore", post(admin::restore))
         .route("/admin/api/audit", get(admin::audit_log))
+        .layer(axum::middleware::from_fn(log::request_log))
         .with_state(app)
 }
 

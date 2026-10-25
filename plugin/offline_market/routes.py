@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from .bundle import BundleError, extract_zip
 from .client import BackendClient, BackendError
 from .runtime import PluginSettings
 
@@ -28,7 +29,7 @@ def build_router(settings: PluginSettings):
 
     def client() -> BackendClient:
         url, tenant = settings.market_url, settings.tenant
-        if not url or not tenant:
+        if not tenant:
             raise HTTPException(
                 status_code=503,
                 detail={
@@ -85,6 +86,15 @@ def build_router(settings: PluginSettings):
     def skill_status(slug: str) -> Any:
         return call(client().status, slug)
 
+    def required(name: str, version: str) -> tuple[str, str]:
+        for field, value in (("name", name), ("version", version)):
+            if not value.strip():
+                raise HTTPException(
+                    status_code=400,
+                    detail={"code": "invalid_publish", "message": f"缺少字段 {field}"},
+                )
+        return name.strip(), version.strip()
+
     @router.post("/skills")
     def publish(payload: dict = Body(...)) -> Any:
         files = payload.get("files")
@@ -95,18 +105,45 @@ def build_router(settings: PluginSettings):
                 status_code=400,
                 detail={"code": "invalid_files", "message": "files 必须是 {路径: 文本内容}"},
             )
-        for required in ("name", "version"):
-            if not str(payload.get(required) or "").strip():
-                raise HTTPException(
-                    status_code=400,
-                    detail={"code": "invalid_publish", "message": f"缺少字段 {required}"},
-                )
+        name, version = required(
+            str(payload.get("name") or ""), str(payload.get("version") or "")
+        )
         return call(
             client().publish,
-            name=str(payload["name"]),
+            name=name,
             slug=payload.get("slug") or None,
-            version=str(payload["version"]),
+            version=version,
             visibility=str(payload.get("visibility") or "public"),
+            files=files,
+        )
+
+    @router.post("/skills/zip")
+    def publish_zip(
+        payload: bytes = Body(..., media_type="application/zip"),
+        name: str = "",
+        slug: str = "",
+        version: str = "",
+        visibility: str = "public",
+    ) -> Any:
+        """Publish from a .zip upload: the page sends the archive as raw body.
+
+        Raw body instead of multipart keeps the plugin free of the
+        python-multipart dependency (plugins run inside the host's venv).
+        """
+        name, version = required(name, version)
+        try:
+            files = extract_zip(payload)
+        except BundleError as exc:
+            raise HTTPException(
+                status_code=400,
+                detail={"code": exc.code, "message": str(exc)},
+            ) from exc
+        return call(
+            client().publish,
+            name=name,
+            slug=slug.strip() or None,
+            version=version,
+            visibility=visibility.strip() or "public",
             files=files,
         )
 
