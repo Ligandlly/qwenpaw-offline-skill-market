@@ -47,7 +47,11 @@ SKIP_DIRS = {"__pycache__", ".ruff_cache", ".pytest_cache", ".mypy_cache", "test
 SKIP_FILES = {".DS_Store", "Thumbs.db", "desktop.ini"}
 SKIP_SUFFIXES = {".pyc", ".pyo", ".log"}
 
-# 固定时间戳 + 固定权限，同样的源码重复打包得到同样的 sha256。
+# Windows 检出是 CRLF、CI 检出是 LF；统一成 LF，同一个 commit 在哪台机器
+# 打包都得到同一个 sha256（也给 Linux 目标机器省掉没意义的 \r）。
+TEXT_SUFFIXES = {".py", ".js", ".md", ".json", ".txt", ".sh", ".yml", ".yaml"}
+
+# 固定时间戳 + 固定权限 + 统一 LF，同一个 commit 在哪台机器打包都得到同样的 sha256。
 FIXED_DATE = (1980, 1, 1, 0, 0, 0)
 FILE_MODE = 0o644
 
@@ -142,6 +146,13 @@ def sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def payload(path: Path) -> bytes:
+    data = path.read_bytes()
+    if path.suffix in TEXT_SUFFIXES:
+        data = data.replace(b"\r\n", b"\n")
+    return data
+
+
 def build(plugin_dir: Path, out_dir: Path) -> Path:
     manifest = validate(plugin_dir)
     plugin_id = manifest["id"]
@@ -162,7 +173,7 @@ def build(plugin_dir: Path, out_dir: Path) -> Path:
             info.create_system = 3  # unix，权限位才有意义
             info.external_attr = FILE_MODE << 16
             info.compress_type = zipfile.ZIP_DEFLATED
-            archive.writestr(info, source.read_bytes())
+            archive.writestr(info, payload(source))
 
     verify_zip(zip_path, plugin_id, manifest)
 
