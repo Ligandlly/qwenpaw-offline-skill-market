@@ -51,7 +51,9 @@ SKIP_SUFFIXES = {".pyc", ".pyo", ".log"}
 # 打包都得到同一个 sha256（也给 Linux 目标机器省掉没意义的 \r）。
 TEXT_SUFFIXES = {".py", ".js", ".md", ".json", ".txt", ".sh", ".yml", ".yaml"}
 
-# 固定时间戳 + 固定权限 + 统一 LF，同一个 commit 在哪台机器打包都得到同样的 sha256。
+# 固定时间戳 + 固定权限 + 统一 LF：同一个 commit 在同一套 Python/zlib 上
+# 重复打包 sha256 一致，且 Windows 检出的 CRLF 不会混进 Linux 包
+# （跨 Python/zlib 版本压缩结果不同，不保证字节级一致）。
 FIXED_DATE = (1980, 1, 1, 0, 0, 0)
 FILE_MODE = 0o644
 
