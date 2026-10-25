@@ -120,6 +120,95 @@ impl Harness {
 }
 
 #[tokio::test]
+async fn publisher_name_labels_a_listing_without_touching_ownership() {
+    let h = Harness::new();
+    let (status, body, _) = h
+        .call(
+            "POST",
+            "/api/v1/skills",
+            Some("personal-179b9d"),
+            Some(json!({
+                "name": "Named", "slug": "named", "version": "1.0.0", "visibility": "public",
+                "publisher_name": "  admin\n",
+                "files": { "SKILL.md": GOOD_MANIFEST }
+            })),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+
+    let (_s, listing, _) = h
+        .call("GET", "/api/v1/skills", Some("tenant-b"), None, None)
+        .await;
+    let named = listing["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["slug"] == "named")
+        .unwrap()
+        .clone();
+    assert_eq!(
+        named["owner_name"], "admin",
+        "trimmed, control chars dropped"
+    );
+    assert_eq!(named["owner_tenant"], "personal-179b9d");
+
+    // a later publish without a name must not wipe the recorded one
+    h.publish("personal-179b9d", "anon", "1.0.0", "public")
+        .await;
+    let (_s, listing, _) = h
+        .call("GET", "/api/v1/skills", Some("tenant-b"), None, None)
+        .await;
+    let items = listing["items"].as_array().unwrap();
+    let anon = items.iter().find(|i| i["slug"] == "anon").unwrap();
+    assert_eq!(anon["owner_name"], "admin");
+
+    // a tenant nobody reported a name for falls back to nothing at all
+    h.publish("personal-ffff", "quiet", "1.0.0", "public").await;
+    let (_s, listing, _) = h
+        .call("GET", "/api/v1/skills", Some("tenant-b"), None, None)
+        .await;
+    let quiet = listing["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["slug"] == "quiet")
+        .unwrap()
+        .clone();
+    assert!(quiet["owner_name"].is_null(), "{quiet}");
+    assert_eq!(quiet["owner_tenant"], "personal-ffff");
+
+    // the owner sees the same label in its own listing
+    let (status, mine, _) = h
+        .call(
+            "GET",
+            "/api/v1/skills/mine",
+            Some("personal-179b9d"),
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(mine["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|i| i["owner_name"] == "admin"));
+
+    // and the admin plane too
+    let cookie = h.login().await;
+    let (status, admin, _) = h
+        .call("GET", "/admin/api/skills", None, None, Some(&cookie))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(admin["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|i| i["owner_name"] == "admin"));
+}
+
+#[tokio::test]
 async fn tenant_header_is_required() {
     let h = Harness::new();
     let (status, body, _) = h.call("GET", "/api/v1/skills", None, None, None).await;

@@ -119,7 +119,7 @@ class OfflineMarketProvider:
                 source_url=item.get("install_url")
                 or f"{client.base_url}/skills/{item['slug']}/{item.get('latest_version') or 'latest'}",
                 version=item.get("latest_version"),
-                author=item.get("owner_tenant"),
+                author=item.get("owner_name") or item.get("owner_tenant"),
                 icon_url=None,
                 stats={
                     "versions": item.get("versions", 0),

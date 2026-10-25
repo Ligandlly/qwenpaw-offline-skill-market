@@ -8,9 +8,12 @@ PRAGMA journal_mode = WAL;
 PRAGMA foreign_keys = ON;
 
 CREATE TABLE IF NOT EXISTS tenants (
-    id          TEXT PRIMARY KEY,
-    first_seen  INTEGER NOT NULL,
-    last_seen   INTEGER NOT NULL
+    id           TEXT PRIMARY KEY,
+    first_seen   INTEGER NOT NULL,
+    last_seen    INTEGER NOT NULL,
+    -- Publisher name the plugin reports (the tenant's own login name). Purely
+    -- cosmetic: ownership is *always* `owner_tenant`, never this column.
+    display_name TEXT
 );
 
 CREATE TABLE IF NOT EXISTS admin_users (
@@ -65,13 +68,29 @@ pub fn open(path: &Path) -> rusqlite::Result<Connection> {
     }
     let conn = Connection::open(path)?;
     conn.execute_batch(SCHEMA)?;
+    migrate(&conn)?;
     Ok(conn)
 }
 
 pub fn open_memory() -> rusqlite::Result<Connection> {
     let conn = Connection::open_in_memory()?;
     conn.execute_batch(SCHEMA)?;
+    migrate(&conn)?;
     Ok(conn)
+}
+
+/// `CREATE TABLE IF NOT EXISTS` cannot add columns to a market that is
+/// already running, so older databases get the new ones here. Idempotent.
+fn migrate(conn: &Connection) -> rusqlite::Result<()> {
+    let columns: Vec<String> = conn
+        .prepare("PRAGMA table_info(tenants)")?
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<rusqlite::Result<_>>()?;
+    if !columns.iter().any(|name| name == "display_name") {
+        conn.execute("ALTER TABLE tenants ADD COLUMN display_name TEXT", [])?;
+        tracing::info!("schema: tenants.display_name added");
+    }
+    Ok(())
 }
 
 pub fn now() -> i64 {

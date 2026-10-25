@@ -196,11 +196,13 @@ pub async fn list_skills(
     let limit = query.limit.clamp(1, 200);
     let db = app.db();
     let sql = r#"
-        SELECT s.slug, s.name, s.owner_tenant, s.visibility, s.latest_version,
+        SELECT s.slug, s.name, s.owner_tenant, t.display_name AS owner_name,
+               s.visibility, s.latest_version,
                s.created_at, s.withdrawn_at, s.takedown_at, s.takedown_reason,
                COALESCE((SELECT COUNT(*) FROM skill_versions v WHERE v.slug = s.slug), 0) AS versions,
                COALESCE((SELECT SUM(size_bytes) FROM skill_versions v WHERE v.slug = s.slug), 0) AS size_bytes
         FROM skills s
+        LEFT JOIN tenants t ON t.id = s.owner_tenant
         WHERE s.slug LIKE ?1 OR s.name LIKE ?1
         ORDER BY s.created_at DESC
         LIMIT ?2
@@ -361,6 +363,7 @@ fn row_to_admin_skill(row: &rusqlite::Row<'_>, public_url: &str) -> rusqlite::Re
         slug,
         name: row.get("name")?,
         owner_tenant: row.get("owner_tenant")?,
+        owner_name: row.get("owner_name")?,
         visibility: row.get("visibility")?,
         latest_version: row.get("latest_version")?,
         created_at: row.get("created_at")?,

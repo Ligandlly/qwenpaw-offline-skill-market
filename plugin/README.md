@@ -105,6 +105,35 @@ class OfflineMarketProvider:          # MarketProvider + MarketInstallProvider
 无构建步骤：`frontend/market.js` 是普通 ES module，React/antd 从 `window.QwenPaw.host` 取。
 端到端验证脚本：`spikes/m3_verify.py`（Playwright，覆盖菜单→安装→发布→下架后徽标）。
 
+### 发布者名字：从租户 id 到登录名
+
+市场只认租户 id（`personal-179b…`），拿它当“发布者”不好看。页面因此在发布前调一次
+`GET /api/auth/verify`（带 console 自己的 Bearer token，hub 模式和单机模式都答 `{username}`），
+把登录名作为 `publisher_name` 随发布请求带给插件路由，再由市场按租户存下来：
+
+- 列表“发布者”列显示 `owner_name`；没名字（功能上线前发的、或运行时没登录名）就回落显示租户 id。
+- 自己发布的行多一个「（我）」：和 `/offline-market/config` 里的 `tenant` 比 `owner_tenant` 得出。
+- 发布页会先告诉你会记下哪个名字（取不到时写明会退化成租户 id）。
+- 名字只是**标签**：属主/撤回/下架判定全部在服务端用租户头，填什么都不影响权限。
+
+主机内置市场（宿主自己的 marketplace）里的作者字段也一起用上了 `owner_name`。
+
+### 浏览器控制台：banner + 调试日志
+
+加载时无条件打印一段 ASCII banner（版本、页面名、开关提示）。日志默认静默，打开任意一层即可，
+**不用重装插件**：
+
+| 方式 | 生效范围 |
+| --- | --- |
+| 控制台执行 `OfflineMarketDebug.enable()` | 当前标签页，立即生效 |
+| 同上 + 刷新（写 `localStorage["offline-market:debug"]="1"`） | 本浏览器持久生效；`disable()` 关掉 |
+| 模块加载前设 `window.QWENPAW_OFFLINE_MARKET_DEBUG = true` | 覆盖 localStorage（可为 `false` 强制静默） |
+
+打开后能看到：宿主就绪耗时与轮询次数、`apiUrl()` 的解析结果、每次请求的
+方法/路径/状态码/耗时/agent 头/响应体摘要、超时与闸门/限额告警、安装任务每次轮询、
+发布/撤回/恢复的结果，以及「已安装」页的详情 fan-out 进度。前缀统一是
+`[offline-market]`（debug 行是 `[offline-market]·debug`），筛选关键词即可只看本插件。
+
 ### 发布用的压缩包规则
 
 页面上传一个 `.zip`，插件在 runtime 内解压成后端要的 `{路径: 文本}`：

@@ -65,15 +65,26 @@ $env:MARKET_PUBLIC_URL="http://10.137.157.214:8080"; cargo run
 
 `X-Tenant-Id` 不是认证，是**内网信任**。后端必须部署在只有租户运行时能访问的网段。
 
+### 发布者名字（`publisher_name` / `owner_name`）
+
+租户身份永远是 `personal-<hex>` 这种 id，拿它当“发布者”没法看。所以：
+
+- 发布时插件可以多带一个 `publisher_name`（它从 console 自己的 `/api/auth/verify` 取登录名），
+  后端把名字写进 `tenants.display_name`，不是每个技能一行。
+- 列表 / `mine` / admin 列表因此多一个 `owner_name`（旧数据为 `null`，由前端回落显示租户 id）。
+- **只影响显示**：属主、撤回、下架判定全部只看 `owner_tenant`；名字可以被发布者随便填，
+  也允许不填（不填时 `COALESCE` 保留上一次的名字，不会抹掉）。长度上限 64 字符，控制字符会被剔除。
+- 老库启动时自动 `ALTER TABLE tenants ADD COLUMN display_name TEXT`（`db::migrate`，幂等）。
+
 ## 租户面
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | GET | `/api/v1/limits` | 插件据此对齐预检阈值，避免前后不一致 |
-| GET | `/api/v1/skills?q=&page=&limit=` | 市场列表：公开 + 自己的私有；已撤回/已下架不出现 |
+| GET | `/api/v1/skills?q=&page=&limit=` | 市场列表：公开 + 自己的私有；已撤回/已下架不出现（带 `owner_name`） |
 | GET | `/api/v1/skills/mine` | 自己的全部（含已撤回） |
 | GET | `/api/v1/skills/{slug}/status` | `active` / `withdrawn` / `taken_down`，用于"已安装但被下架"标记 |
-| POST | `/api/v1/skills` | 发布不可变版本 |
+| POST | `/api/v1/skills` | 发布不可变版本；可选 `publisher_name`（展示用，见下） |
 | POST | `/api/v1/skills/{slug}/withdraw` | 属主撤回（可恢复） |
 | POST | `/api/v1/skills/{slug}/restore` | 属主恢复；被管理员下架的不可自恢复（409） |
 | GET | `/skills/{slug}/{version}` | **`bundle_url`**，返回 `{name, version, files, source_url}`；`version=latest` 走指针 |

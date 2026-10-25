@@ -7,6 +7,7 @@ import io
 import zipfile
 
 import pytest
+from urllib.parse import quote
 
 fastapi = pytest.importorskip("fastapi")
 from fastapi import FastAPI  # noqa: E402
@@ -143,6 +144,50 @@ def test_publish_zip_rejects_broken_archives_and_missing_fields(api, env, backen
     assert no_version.status_code == 400
     assert "version" in no_version.json()["detail"]["message"]
     assert not backend.requests  # nothing ever reached the backend
+
+
+def test_publish_forwards_the_publisher_name_and_clamps_it(api, env, backend):
+    backend.on("POST", "/api/v1/skills", 201, {"slug": "demo", "version": "1.0.0"})
+    manifest = "---\nname: demo\ndescription: x\n---\n"
+
+    api.post(
+        "/offline-market/skills",
+        json={
+            "name": "Demo",
+            "version": "1.0.0",
+            "files": {"SKILL.md": manifest},
+            "publisher_name": "  admin\n",
+        },
+    )
+    assert backend.requests[-1]["body"]["publisher_name"] == "admin"
+
+    # the zip route takes it as a query parameter, clamped to 64 characters
+    api.post(
+        f"/offline-market/skills/zip?name=Demo&version=1.0.0&publisher_name={quote('张' * 100)}",
+        content=make_zip({"SKILL.md": manifest}),
+        headers={"content-type": "application/zip"},
+    )
+    assert backend.requests[-1]["body"]["publisher_name"] == "张" * 64
+
+    # an empty name is not sent at all: the market keeps what it already has
+    api.post(
+        "/offline-market/skills",
+        json={
+            "name": "Demo",
+            "version": "1.0.0",
+            "files": {"SKILL.md": manifest},
+            "publisher_name": "   ",
+        },
+    )
+    assert "publisher_name" not in backend.requests[-1]["body"]
+
+    # and neither is a non-string one
+    api.post(
+        "/offline-market/skills/zip?name=Demo&version=1.0.0",
+        content=make_zip({"SKILL.md": manifest}),
+        headers={"content-type": "application/zip"},
+    )
+    assert "publisher_name" not in backend.requests[-1]["body"]
 
 
 def test_backend_errors_pass_through_with_their_status(api, env, backend):

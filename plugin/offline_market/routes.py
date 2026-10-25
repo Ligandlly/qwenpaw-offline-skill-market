@@ -20,6 +20,18 @@ def _status_for(error: BackendError) -> int:
         return 502
     return error.status if 400 <= error.status < 600 else 502
 
+# Publisher names are labels, never identities: ownership stays the tenant header
+# the runtime sets, so a page can only mislabel itself. Clamped anyway — the
+# market stores this next to the tenant row.
+MAX_PUBLISHER_NAME = 64
+
+def clean_publisher_name(raw: Any) -> str | None:
+    """Trim and clamp a browser-supplied publisher name; ``None`` if unusable."""
+    if not isinstance(raw, str):
+        return None
+    cleaned = "".join(char for char in raw if char.isprintable()).strip()
+    return cleaned[:MAX_PUBLISHER_NAME] or None
+
 
 def build_router(settings: PluginSettings):
     """Import fastapi lazily: importing this module must not require it."""
@@ -114,6 +126,7 @@ def build_router(settings: PluginSettings):
             slug=payload.get("slug") or None,
             version=version,
             visibility=str(payload.get("visibility") or "public"),
+            publisher_name=clean_publisher_name(payload.get("publisher_name")),
             files=files,
         )
 
@@ -124,6 +137,7 @@ def build_router(settings: PluginSettings):
         slug: str = "",
         version: str = "",
         visibility: str = "public",
+        publisher_name: str = "",
     ) -> Any:
         """Publish from a .zip upload: the page sends the archive as raw body.
 
@@ -144,6 +158,7 @@ def build_router(settings: PluginSettings):
             slug=slug.strip() or None,
             version=version,
             visibility=visibility.strip() or "public",
+            publisher_name=clean_publisher_name(publisher_name),
             files=files,
         )
 

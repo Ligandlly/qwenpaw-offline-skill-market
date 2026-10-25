@@ -11,20 +11,132 @@
  * `provider_key: "offline-market"`, then poll `/status/{task_id}`.
  */
 const PLUGIN_ID = "offline-market";
+const PLUGIN_VERSION = "0.1.0"; // keep in sync with plugin.json
+const PLUGIN_LABEL = "技能市场（内网）";
 const VISIBILITY_LABEL = { public: "公开", tenant: "仅本租户" };
 const STATE_LABEL = { active: "已上架", withdrawn: "已撤回", taken_down: "已下架" };
 const STATE_COLOR = { active: "green", withdrawn: "default", taken_down: "red" };
 
+// ------------------------------------------------------------------ debug ---
+// Silent by default. Turn it on without rebuilding anything, either way:
+//   OfflineMarketDebug.enable()                  // lives until the tab closes
+//   OfflineMarketDebug.enable()  + reload        // persisted in localStorage
+//   localStorage.setItem("offline-market:debug", "1") + reload
+//   window.QWENPAW_OFFLINE_MARKET_DEBUG = true   // set before the module loads
+const DEBUG_STORAGE_KEY = "offline-market:debug";
+
+function readDebugFlag() {
+  try {
+    const forced = window.QWENPAW_OFFLINE_MARKET_DEBUG;
+    if (typeof forced === "boolean") return forced;
+    return window.localStorage.getItem(DEBUG_STORAGE_KEY) === "1";
+  } catch (err) {
+    return false; // storage disabled (private mode, sandboxed frame)
+  }
+}
+
+let debugOn = readDebugFlag();
+
+const PREFIX = `[${PLUGIN_ID}]`;
+const logger = {
+  debug: (...args) => {
+    if (debugOn) console.debug(`${PREFIX}·debug`, ...args);
+  },
+  info: (...args) => console.info(PREFIX, ...args),
+  warn: (...args) => console.warn(PREFIX, ...args),
+  error: (...args) => console.error(PREFIX, ...args),
+};
+
+// ANSI-shadow-ish figlet block; ASCII only so alignment survives any console.
+const BANNER_ART = [
+  "  ___  _____ _____ _     ___ _   _ _____ ",
+  " / _ \\|  ___|  ___| |   |_ _| \\ | | ____|",
+  "| | | | |_  | |_  | |    | ||  \\| |  _|  ",
+  "| |_| |  _| |  _| | |___ | || |\\  | |___ ",
+  " \\___/|_|   |_|   |_____|___|_| \\_|_____|",
+  "",
+  " __  __    _    ____  _  _______ _____ ",
+  "|  \\/  |  / \\  |  _ \\| |/ / ____|_   _|",
+  "| |\\/| | / _ \\ | |_) | ' /|  _|   | |  ",
+  "| |  | |/ ___ \\|  _ <| . \\| |___  | |  ",
+  "|_|  |_/_/   \\_\\_| \\_\\_|\\_\\_____| |_|  ",
+];
+
+function printBanner() {
+  console.log(
+    `%c${BANNER_ART.join("\n")}`,
+    "color:#7c5cff;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:11px;line-height:1.15",
+  );
+  console.log(
+    `%c🧩 ${PLUGIN_ID}%c v${PLUGIN_VERSION} · ${PLUGIN_LABEL} · QwenPaw frontend plugin`,
+    "background:#7c5cff;color:#fff;padding:1px 6px;border-radius:3px;font-weight:600",
+    "color:#7c5cff;font-weight:600",
+  );
+  console.log(
+    `%c调试日志：%cOfflineMarketDebug.enable()%c（刷新后仍生效；关闭用 disable()）`,
+    "color:#888",
+    "color:#7c5cff;font-weight:600",
+    "color:#888",
+  );
+}
+
+window.OfflineMarketDebug = {
+  version: PLUGIN_VERSION,
+  get enabled() {
+    return debugOn;
+  },
+  enable(persist = true) {
+    debugOn = true;
+    if (persist) {
+      try {
+        window.localStorage.setItem(DEBUG_STORAGE_KEY, "1");
+      } catch (err) {
+        logger.warn("无法写入 localStorage，debug 仅本次会话有效", err);
+      }
+    }
+    printBanner();
+    logger.info(`debug 已开启（持久化：${persist ? "是" : "否"}）`);
+    return true;
+  },
+  disable(persist = true) {
+    debugOn = false;
+    if (persist) {
+      try {
+        window.localStorage.removeItem(DEBUG_STORAGE_KEY);
+      } catch (err) {
+        // nothing to clean up
+      }
+    }
+    logger.info("debug 已关闭");
+    return false;
+  },
+};
+
+printBanner();
+logger.debug(
+  `模块加载 version=${PLUGIN_VERSION} debug=${debugOn} host=${Boolean(window.QwenPaw)}`,
+);
+
 function whenHost(callback, deadlineMs = 15000) {
   const started = Date.now();
+  let attempts = 0;
+  logger.debug(`等待宿主 window.QwenPaw（上限 ${deadlineMs}ms）`);
   const tick = () => {
     const paw = window.QwenPaw;
+    attempts += 1;
     if (paw && paw.host && paw.host.React && paw.menu && paw.route) {
+      logger.debug(
+        `宿主就绪：${Date.now() - started}ms / ${attempts} 次轮询`,
+        { version: paw.version || "?", hasAntd: Boolean(paw.host.antd) },
+      );
       callback(paw);
       return;
     }
     if (Date.now() - started > deadlineMs) {
-      console.error("[offline-market] window.QwenPaw never became available");
+      logger.error(
+        `window.QwenPaw 在 ${deadlineMs}ms 内不可用，页面未注册`,
+        { attempts, hostKeys: paw ? Object.keys(paw) : null },
+      );
       return;
     }
     setTimeout(tick, 50);
@@ -35,8 +147,14 @@ function whenHost(callback, deadlineMs = 15000) {
 function apiUrl(path) {
   const host = window.QwenPaw && window.QwenPaw.host;
   // NOTE: getApiUrl() already prepends "/api" (console/src/api/config.ts).
-  if (host && typeof host.getApiUrl === "function") return host.getApiUrl(path);
-  return `/api${path.startsWith("/") ? path : `/${path}`}`;
+  if (host && typeof host.getApiUrl === "function") {
+    const url = host.getApiUrl(path);
+    logger.debug(`apiUrl(host.getApiUrl) ${path} -> ${url}`);
+    return url;
+  }
+  const url = `/api${path.startsWith("/") ? path : `/${path}`}`;
+  logger.debug(`apiUrl(本地兜底) ${path} -> ${url}`);
+  return url;
 }
 
 // The console always sends the selected agent; without it the host falls back
@@ -72,6 +190,8 @@ function selectedAgentId() {
 const REQUEST_TIMEOUT_MS = 15000;
 
 async function request(path, init) {
+  const method = (init && init.method) || "GET";
+  const url = apiUrl(path);
   const host = window.QwenPaw && window.QwenPaw.host;
   const token = host && typeof host.getApiToken === "function" ? host.getApiToken() : "";
   const headers = { accept: "application/json", ...((init && init.headers) || {}) };
@@ -80,10 +200,17 @@ async function request(path, init) {
   if (agent) headers["X-Agent-Id"] = agent;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  const started = Date.now();
+  logger.debug(`→ ${method} ${path}`, {
+    url,
+    agent: agent || "(未选中，宿主用 active_agent)",
+    token: token ? "已附带" : "无",
+    timeout: REQUEST_TIMEOUT_MS,
+  });
   let response;
   let text;
   try {
-    response = await fetch(apiUrl(path), {
+    response = await fetch(url, {
       credentials: "same-origin",
       ...init,
       headers,
@@ -93,24 +220,34 @@ async function request(path, init) {
     // otherwise hang here with the abort timer already cleared
     text = await response.text();
   } catch (err) {
+    const elapsed = Date.now() - started;
     if (err && err.name === "AbortError") {
+      logger.error(`✗ ${method} ${path} 超时 ${elapsed}ms（AbortController）`);
       throw new Error(`请求超时（${REQUEST_TIMEOUT_MS / 1000}s）：${path}`);
     }
+    logger.error(`✗ ${method} ${path} 网络/传输失败 ${elapsed}ms`, err);
     throw err;
   } finally {
     clearTimeout(timer);
   }
+  const elapsed = Date.now() - started;
   let body = {};
   try {
     body = text ? JSON.parse(text) : {};
   } catch (err) {
+    logger.warn(`响应不是 JSON（${text.length} 字节），按原文透传`, { path, status: response.status });
     body = { raw: text };
   }
+  logger.debug(
+    `← ${method} ${path} ${response.status} ${elapsed}ms`,
+    text.length > 2000 ? `… ${text.length} 字节响应体（过长，已省略）` : body,
+  );
   if (!response.ok) {
     const detail = (body && body.detail) || {};
     const error = new Error(detail.message || `HTTP ${response.status}`);
     error.code = detail.code || `http_${response.status}`;
     error.status = response.status;
+    logger.warn(`✗ ${method} ${path} ${response.status} [${error.code}] ${error.message}`);
     throw error;
   }
   return body;
@@ -167,6 +304,48 @@ whenHost((paw) => {
   const Title = Typography.Title || ((props) => h("h3", props, props.children));
   const Paragraph = Typography.Paragraph || ((props) => h("p", props, props.children));
 
+  // ------------------------------------------------------------- identity ---
+
+  let currentUserNamePromise = null;
+
+  // The market only ever authenticates us as `personal-<hex>`, which reads badly
+  // as 发布者. The console's own login name is reachable from the page:
+  // /api/auth/verify answers {username} in hub mode (the hub serves that path)
+  // and standalone alike, authenticated with the same host token the console
+  // uses. Purely cosmetic — ownership on the market is the tenant header.
+  // A failure is not cached, so a publish after signing in can still pick it up.
+  function currentUserName() {
+    if (!currentUserNamePromise) {
+      currentUserNamePromise = (async () => {
+        try {
+          const body = await request("/auth/verify");
+          const name = typeof body.username === "string" ? body.username.trim() : "";
+          logger.debug(`当前登录用户名 username=${name || "(空)"}`);
+          return name;
+        } catch (err) {
+          currentUserNamePromise = null;
+          logger.warn("取不到当前登录用户名，发布者只会是租户 id", err);
+          return "";
+        }
+      })();
+    }
+    return currentUserNamePromise;
+  }
+
+  function useCurrentUserName() {
+    const [name, setName] = useState("");
+    useEffect(() => {
+      let alive = true;
+      currentUserName().then((value) => {
+        if (alive) setName(value);
+      });
+      return () => {
+        alive = false;
+      };
+    }, []);
+    return name;
+  }
+
   // ---------------------------------------------------------------- shared ---
 
   function useMarketData() {
@@ -175,15 +354,25 @@ whenHost((paw) => {
     const [error, setError] = useState(null);
 
     const reloadConfig = useCallback(async () => {
+      logger.debug("加载 /offline-market/config + /limits");
       try {
-        setConfig(await getJson("/offline-market/config"));
+        const config = await getJson("/offline-market/config");
+        setConfig(config);
+        logger.debug("config", config);
+        if ((config.problems || []).length) {
+          logger.warn("市场不可用（闸门/配置）", config.problems);
+        }
       } catch (err) {
+        logger.error("config 加载失败", err);
         setError(err.message);
       }
       try {
-        setLimits(await getJson("/offline-market/limits"));
+        const limits = await getJson("/offline-market/limits");
+        setLimits(limits);
+        logger.debug("limits", limits);
       } catch (err) {
         // limits are advisory only; the backend enforces them
+        logger.warn("limits 未取到（仅影响前端预检）", err);
         setLimits(null);
       }
     }, []);
@@ -228,35 +417,48 @@ whenHost((paw) => {
 
     const cancel = useCallback(async () => {
       if (!task || !task.taskId) return;
+      logger.debug(`取消安装任务 ${task.taskId}（${task.slug}）`);
       try {
         await postJson(`/skills/hub/install/cancel/${task.taskId}`);
         setTask(null);
         setBusySlug("");
+        logger.info(`安装已取消：${task.slug}`);
         onDone && onDone({ type: "warning", text: "已取消安装" });
       } catch (err) {
+        logger.error("取消安装失败", err);
         onDone && onDone({ type: "error", text: err.message });
       }
     }, [task, onDone]);
 
     const install = useCallback(
       async (item) => {
+        const started = Date.now();
+        logger.info(`开始安装 ${item.slug}@${item.latest_version || "-"}`);
+        logger.debug("安装参数", {
+          provider_key: PLUGIN_ID,
+          bundle_url: item.install_url,
+          version: item.latest_version || "(最新)",
+        });
         setBusySlug(item.slug);
         setTask(null);
         try {
-          const started = await postJson("/skills/hub/install/start", {
+          const startedTask = await postJson("/skills/hub/install/start", {
             provider_key: PLUGIN_ID,
             bundle_url: item.install_url,
             version: item.latest_version || "",
           });
-          const taskId = started.task_id;
-          setTask({ taskId, slug: item.slug, status: started.status });
+          const taskId = startedTask.task_id;
+          logger.debug(`宿主任务已创建 task_id=${taskId} status=${startedTask.status}`);
+          setTask({ taskId, slug: item.slug, status: startedTask.status });
           for (let attempt = 0; attempt < 240; attempt += 1) {
             await new Promise((resolve) => setTimeout(resolve, 500));
             const status = await getJson(`/skills/hub/install/status/${taskId}`);
+            logger.debug(`轮询 #${attempt + 1} ${taskId} -> ${status.status}`);
             setTask({ taskId, slug: item.slug, status: status.status });
             if (status.status === "completed") {
               setBusySlug("");
               setTask(null);
+              logger.info(`安装完成 ${item.slug}（${Date.now() - started}ms）`, status.result || null);
               onDone &&
                 onDone({
                   type: "success",
@@ -267,16 +469,19 @@ whenHost((paw) => {
             if (status.status === "failed" || status.status === "cancelled") {
               setBusySlug("");
               setTask(null);
+              logger.error(`安装${status.status === "failed" ? "失败" : "被取消"}：${item.slug}`, status);
               onDone && onDone({ type: "error", text: status.error || status.status });
               return;
             }
           }
           setBusySlug("");
           setTask(null);
+          logger.error(`安装轮询超时（120s）：${item.slug}`);
           onDone && onDone({ type: "warning", text: "安装超时，请到技能页查看" });
         } catch (err) {
           setBusySlug("");
           setTask(null);
+          logger.error(`安装失败：${item.slug}`, err);
           onDone && onDone({ type: "error", text: err.message });
         }
       },
@@ -288,7 +493,7 @@ whenHost((paw) => {
 
   // ------------------------------------------------------------------ tabs ---
 
-  function MarketTab({ limits, onNotice, refreshToken }) {
+  function MarketTab({ limits, onNotice, refreshToken, tenant }) {
     const [items, setItems] = useState([]);
     const [query, setQuery] = useState("");
     const [loading, setLoading] = useState(false);
@@ -297,12 +502,22 @@ whenHost((paw) => {
     const load = useCallback(
       async (value) => {
         setLoading(true);
+        logger.debug(`市场列表加载 q=${JSON.stringify(value || "")}`);
         try {
           const body = await getJson(
             `/offline-market/skills?q=${encodeURIComponent(value || "")}&limit=50`,
           );
-          setItems(body.items || []);
+          const items = body.items || [];
+          setItems(items);
+          logger.debug(
+            `市场列表 ${items.length} 条`,
+            items.map(
+              (item) =>
+                `${item.slug}@${item.latest_version || "-"}${item.owner_name ? `(${item.owner_name})` : ""}`,
+            ),
+          );
         } catch (err) {
+          logger.error("市场列表加载失败", err);
           onNotice({ type: "error", text: err.message });
           setItems([]);
         } finally {
@@ -339,7 +554,19 @@ whenHost((paw) => {
           render: (value) =>
             h(Tag, { color: value === "public" ? "blue" : "gold" }, VISIBILITY_LABEL[value] || value),
         },
-        { title: "发布者", dataIndex: "owner_tenant", width: 140 },
+        {
+          title: "发布者",
+          dataIndex: "owner_name",
+          width: 160,
+          // `owner_name` is whatever the publisher's runtime reported; skills
+          // published before that existed (or by a tenant that never sent one)
+          // fall back to the tenant id the market really knows.
+          render: (_, row) => {
+            const label = row.owner_name || row.owner_tenant || "-";
+            const mine = Boolean(tenant) && row.owner_tenant === tenant;
+            return h("span", { title: row.owner_tenant || "" }, mine ? `${label}（我）` : label);
+          },
+        },
         { title: "版本数", dataIndex: "versions", width: 90 },
         {
           title: "操作",
@@ -410,8 +637,14 @@ whenHost((paw) => {
       setLoading(true);
       try {
         const body = await getJson("/offline-market/mine");
-        setItems(body.items || []);
+        const items = body.items || [];
+        setItems(items);
+        logger.debug(
+          `我的发布 ${items.length} 条`,
+          items.map((row) => `${row.slug}@${row.latest_version || "-"}${row.takedown_at ? "(已下架)" : row.withdrawn_at ? "(已撤回)" : ""}`),
+        );
       } catch (err) {
+        logger.error("我的发布加载失败", err);
         onNotice({ type: "error", text: err.message });
       } finally {
         setLoading(false);
@@ -424,14 +657,17 @@ whenHost((paw) => {
 
     const act = useCallback(
       async (row, action) => {
+        logger.info(`${action === "withdraw" ? "撤回" : "恢复"} ${row.slug}`);
         try {
           await postJson(`/offline-market/skills/${encodeURIComponent(row.slug)}/${action}`);
+          logger.debug(`${action} 成功：${row.slug}`);
           onNotice({
             type: "success",
             text: action === "withdraw" ? `已撤回 ${row.slug}` : `已恢复 ${row.slug}`,
           });
           load();
         } catch (err) {
+          logger.error(`${action} 失败：${row.slug}`, err);
           onNotice({ type: "error", text: err.message });
         }
       },
@@ -509,6 +745,7 @@ whenHost((paw) => {
     const [archive, setArchive] = useState(null);
     const [fileError, setFileError] = useState(null);
     const [busy, setBusy] = useState(false);
+    const publisherName = useCurrentUserName();
 
     const onPick = useCallback(async (event) => {
       const picked = (event.target.files || [])[0];
@@ -516,10 +753,14 @@ whenHost((paw) => {
       if (!picked) return;
       try {
         const bytes = await readFileAsBytes(picked);
+        logger.debug(`已选择压缩包 ${picked.name} ${bytes.byteLength} 字节`, {
+          lastModified: picked.lastModified,
+        });
         setArchive({ name: picked.name, bytes });
         setFileError(null);
         if (!name) setName(picked.name.replace(/\.zip$/i, ""));
       } catch (err) {
+        logger.error("读取压缩包失败", err);
         setFileError(err.message);
       }
     }, [name]);
@@ -527,11 +768,13 @@ whenHost((paw) => {
     const submit = useCallback(async () => {
       const problem = precheckArchive(archive, limits);
       if (problem) {
+        logger.warn(`发布预检未通过：${problem}`);
         setFileError(problem);
         return;
       }
       setBusy(true);
       setFileError(null);
+      const started = Date.now();
       try {
         const fallback = archive.name.replace(/\.zip$/i, "");
         const params = new URLSearchParams({
@@ -540,11 +783,22 @@ whenHost((paw) => {
           visibility,
         });
         if (slug.trim()) params.set("slug", slug.trim());
+        // Labels the listing; the market stores it next to our tenant id.
+        const publisher = await currentUserName();
+        if (publisher) params.set("publisher_name", publisher);
+        logger.info(
+          `发布 ${params.get("name")}@${params.get("version")}（${visibility}，发布者 ${
+            publisher || "(未取到)"
+          }）`,
+        );
         const body = await request(`/offline-market/skills/zip?${params}`, {
           method: "POST",
           headers: { "content-type": "application/zip" },
           body: archive.bytes,
         });
+        logger.info(
+          `发布成功 ${body.slug}@${body.version}，${body.file_count} 个文件（${Date.now() - started}ms）`,
+        );
         onNotice({
           type: "success",
           text: `已发布 ${body.slug}@${body.version}（${body.file_count} 个文件）`,
@@ -552,6 +806,7 @@ whenHost((paw) => {
         setArchive(null);
         onPublished && onPublished();
       } catch (err) {
+        logger.error(`发布失败（${Date.now() - started}ms）`, err);
         setFileError(`${err.code ? `[${err.code}] ` : ""}${err.message}`);
       } finally {
         setBusy(false);
@@ -640,6 +895,13 @@ whenHost((paw) => {
           : null,
         fileError ? h(Alert, { type: "error", showIcon: true, message: fileError }) : null,
         h(
+          Text,
+          { type: "secondary" },
+          publisherName
+            ? `发布者：${publisherName}（取当前登录账号，市场列表就显示它）`
+            : "发布者：租户 id（console 未提供登录用户名）",
+        ),
+        h(
           Space,
           null,
           h(Button, { type: "primary", loading: busy, onClick: submit }, "立即发布"),
@@ -682,8 +944,12 @@ whenHost((paw) => {
         if (!candidates.length) return;
 
         const fromMarket = [];
+        logger.debug(`已安装：非 builtin 技能 ${candidates.length} 个，开始拉详情`);
         for (let index = 0; index < candidates.length; index += DETAIL_BATCH) {
           const batch = candidates.slice(index, index + DETAIL_BATCH);
+          logger.debug(
+            `详情批次 ${index / DETAIL_BATCH + 1}：${batch.map((item) => item.name).join(", ")}`,
+          );
           const details = await Promise.all(
             batch.map((item) =>
               // one broken skill must not hide the rest of the list
@@ -693,6 +959,7 @@ whenHost((paw) => {
           details.forEach((detail) => {
             if (detail && detail.installed_from === PLUGIN_ID) fromMarket.push(detail);
           });
+          logger.debug(`来自本市场的技能累计 ${fromMarket.length} 个`);
           setRows(
             fromMarket.map((item) => ({
               ...item,
@@ -718,6 +985,7 @@ whenHost((paw) => {
           });
         } catch (err) {
           // fall through: every row renders as "unknown"
+          logger.warn("lookup 失败，已安装页统一显示未知状态", err);
         }
 
         const rows = fromMarket.map((item) => {
@@ -730,7 +998,12 @@ whenHost((paw) => {
           };
         });
         setRows(rows);
+        logger.debug(
+          `已安装：来自本市场 ${rows.length} 个`,
+          rows.map((row) => `${row.name} -> ${row.market_slug || "?"}/${row.market_state}`),
+        );
       } catch (err) {
+        logger.error("已安装列表加载失败", err);
         onNotice({ type: "error", text: err.message });
       } finally {
         setLoading(false);
@@ -798,6 +1071,7 @@ whenHost((paw) => {
     const [marketToken, setMarketToken] = useState(0);
 
     const onNotice = useCallback((value) => {
+      logger.debug(`通知 [${value.type}] ${value.text}`);
       setNotice(value);
       if (value && value.type === "success") {
         setTimeout(() => setNotice(null), 6000);
@@ -813,7 +1087,12 @@ whenHost((paw) => {
       {
         key: "market",
         label: "市场",
-        children: h(MarketTab, { limits, onNotice, refreshToken: marketToken }),
+        children: h(MarketTab, {
+          limits,
+          onNotice,
+          refreshToken: marketToken,
+          tenant: (config && config.tenant) || "",
+        }),
       },
       {
         key: "publish",
@@ -852,6 +1131,11 @@ whenHost((paw) => {
     );
   }
 
+  logger.debug("注册路由", {
+    id: "offline-market.page",
+    path: "/offline-market",
+    scope: "global",
+  });
   paw.route.add(PLUGIN_ID, {
     id: "offline-market.page",
     path: "/offline-market",
@@ -867,6 +1151,7 @@ whenHost((paw) => {
   });
 
   // Sidebar: right after the built-in marketplace, so both are equally visible.
+  logger.debug("注册侧边栏菜单", { location: "primary.agentScoped", after: "core.marketplace" });
   paw.menu.add(PLUGIN_ID, {
     id: "offline-market.menu",
     location: "primary.agentScoped",
@@ -877,5 +1162,7 @@ whenHost((paw) => {
     route: "offline-market.page",
   });
 
-  console.info("[offline-market] frontend registered");
+  logger.info(
+    `frontend registered（路由 /offline-market，菜单 ${PLUGIN_LABEL}，debug=${debugOn ? "开" : "关"}）`,
+  );
 });

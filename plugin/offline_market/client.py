@@ -147,18 +147,20 @@ class BackendClient:
         files: dict[str, str],
         slug: str | None = None,
         visibility: str = "public",
+        publisher_name: str | None = None,
     ) -> Any:
-        return self._request(
-            "POST",
-            "/api/v1/skills",
-            body={
-                "name": name,
-                "slug": slug,
-                "version": version,
-                "visibility": visibility,
-                "files": files,
-            },
-        )
+        body: dict[str, Any] = {
+            "name": name,
+            "slug": slug,
+            "version": version,
+            "visibility": visibility,
+            "files": files,
+        }
+        if publisher_name:
+            # Sent only when we have one: the market otherwise keeps whatever
+            # name it already recorded (a publish must not blank it).
+            body["publisher_name"] = publisher_name
+        return self._request("POST", "/api/v1/skills", body=body)
 
     def withdraw(self, slug: str, reason: str | None = None) -> Any:
         return self._request(

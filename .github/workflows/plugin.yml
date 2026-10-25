@@ -45,3 +45,6 @@ jobs:
 
       - name: Byte-compile every module
         run: python -m compileall -q offline_market backend.py
+
+      - name: Syntax-check the frontend bundle
+        run: node --check frontend/market.js

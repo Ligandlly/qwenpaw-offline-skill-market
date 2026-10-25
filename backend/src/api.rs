@@ -81,6 +81,9 @@ pub struct SkillRow {
     pub slug: String,
     pub name: String,
     pub owner_tenant: String,
+    /// Publisher name the tenant reported, or `null` for skills published
+    /// before anyone reported one. Display only; never used for access.
+    pub owner_name: Option<String>,
     pub visibility: String,
     pub latest_version: Option<String>,
     pub created_at: i64,
@@ -102,6 +105,7 @@ fn row_to_skill(row: &Row<'_>, public_url: &str) -> rusqlite::Result<SkillRow> {
         slug,
         name: row.get("name")?,
         owner_tenant: row.get("owner_tenant")?,
+        owner_name: row.get("owner_name")?,
         visibility: row.get("visibility")?,
         latest_version: latest,
         created_at: row.get("created_at")?,
@@ -115,11 +119,13 @@ fn row_to_skill(row: &Row<'_>, public_url: &str) -> rusqlite::Result<SkillRow> {
 }
 
 const SKILL_SELECT: &str = r#"
-SELECT s.slug, s.name, s.owner_tenant, s.visibility, s.latest_version,
+SELECT s.slug, s.name, s.owner_tenant, t.display_name AS owner_name, s.visibility,
+       s.latest_version,
        s.created_at, s.withdrawn_at, s.takedown_at, s.takedown_reason,
        COALESCE((SELECT COUNT(*) FROM skill_versions v WHERE v.slug = s.slug), 0) AS versions,
        COALESCE((SELECT SUM(size_bytes) FROM skill_versions v WHERE v.slug = s.slug), 0) AS size_bytes
 FROM skills s
+LEFT JOIN tenants t ON t.id = s.owner_tenant
 "#;
 
 // ---------------------------------------------------------------- handlers ---
@@ -274,6 +280,10 @@ pub struct PublishRequest {
     pub version: String,
     #[serde(default = "default_visibility")]
     pub visibility: String,
+    /// Optional publisher name, resolved by the plugin from the tenant's own
+    /// console login. Cosmetic: it labels the listing, it grants nothing.
+    #[serde(default)]
+    pub publisher_name: Option<String>,
     pub files: BTreeMap<String, String>,
 }
 
@@ -372,6 +382,7 @@ pub async fn publish(
     tenant: TenantId,
     Json(body): Json<PublishRequest>,
 ) -> ApiResult<(StatusCode, Json<Value>)> {
+    let publisher = clean_publisher_name(body.publisher_name.as_deref());
     if !matches!(body.visibility.as_str(), "public" | "tenant") {
         return Err(ApiError::new(
             StatusCode::BAD_REQUEST,
@@ -426,10 +437,13 @@ pub async fn publish(
 
     let db = app.db();
     let actor = tenant.actor();
+    // `publisher` is only written when the plugin actually sent one: a publish
+    // without it must not wipe the name an earlier one recorded.
     db.execute(
-        "INSERT INTO tenants (id, first_seen, last_seen) VALUES (?1, ?2, ?2)
-         ON CONFLICT(id) DO UPDATE SET last_seen = excluded.last_seen",
-        params![tenant.0, now()],
+        "INSERT INTO tenants (id, first_seen, last_seen, display_name) VALUES (?1, ?2, ?2, ?3)
+         ON CONFLICT(id) DO UPDATE SET last_seen = excluded.last_seen,
+             display_name = COALESCE(excluded.display_name, tenants.display_name)",
+        params![tenant.0, now(), publisher],
     )
     .map_err(ApiError::db)?;
 
@@ -560,6 +574,7 @@ pub async fn publish(
         slug = %slug,
         version = %body.version,
         visibility = %body.visibility,
+        publisher = publisher.as_deref().unwrap_or("-"),
         files = checked.files.len(),
         bytes = checked.size_bytes,
         sha256 = %checked.sha256,
@@ -799,6 +814,18 @@ pub async fn fetch_bundle(
 
 // ------------------------------------------------------------------ helpers ---
 
+/// Publisher names are labels, not identities: anything unusable is dropped
+/// instead of failing the publish (ownership is the tenant header, always).
+fn clean_publisher_name(raw: Option<&str>) -> Option<String> {
+    let cleaned: String = raw?.chars().filter(|c| !c.is_control()).take(64).collect();
+    let cleaned = cleaned.trim().to_string();
+    if cleaned.is_empty() {
+        None
+    } else {
+        Some(cleaned)
+    }
+}
+
 fn db_ref(db: &rusqlite::Connection) -> &rusqlite::Connection {
     db
 }
@@ -854,5 +881,21 @@ mod tests {
     fn derives_slugs() {
         assert_eq!(derive_slug("My Skill!"), Some("my-skill".to_string()));
         assert_eq!(derive_slug("技能"), None);
+    }
+
+    #[test]
+    fn cleans_publisher_names_but_never_invents_one() {
+        assert_eq!(clean_publisher_name(Some(" admin ")), Some("admin".into()));
+        assert_eq!(clean_publisher_name(Some("张三")), Some("张三".into()));
+        assert_eq!(
+            clean_publisher_name(Some("\u{0}admin\n")),
+            Some("admin".into())
+        );
+        assert_eq!(clean_publisher_name(Some("   ")), None);
+        assert_eq!(clean_publisher_name(None), None);
+        assert_eq!(
+            clean_publisher_name(Some(&"x".repeat(200))).unwrap().len(),
+            64
+        );
     }
 }

@@ -80,6 +80,38 @@ def test_search_maps_backend_rows(env, backend):
     assert backend.requests[0]["headers"]["x-tenant-id"] == "tenant-a"
 
 
+def test_search_prefers_the_reported_publisher_name(env, backend):
+    backend.on(
+        "GET",
+        "/api/v1/skills",
+        200,
+        {
+            "items": [
+                {
+                    "slug": "named",
+                    "name": "Named Skill",
+                    "latest_version": "1.0.0",
+                    "owner_tenant": "personal-179b9d",
+                    "owner_name": "admin",
+                    "install_url": "http://market.test/skills/named/1.0.0",
+                },
+                # published before anyone reported a name
+                {
+                    "slug": "old",
+                    "name": "Old Skill",
+                    "latest_version": "1.0.0",
+                    "owner_tenant": "personal-179b9d",
+                    "owner_name": None,
+                    "install_url": "http://market.test/skills/old/1.0.0",
+                },
+            ]
+        },
+    )
+    results, _has_more, total = asyncio.run(provider(backend).search("", 10, 1))
+    assert total == 2
+    assert [r.author for r in results] == ["admin", "personal-179b9d"]
+
+
 def test_search_reports_failure_and_then_reports_itself_unavailable(env, backend):
     backend.on("GET", "/api/v1/skills", 500, {"error": {"code": "boom", "message": "backend on fire"}})
     prov = provider(backend)
