@@ -690,7 +690,7 @@ whenHost((paw) => {
         null,
         Input
           ? h(Input, {
-              placeholder: "搜索技能名或 slug",
+              placeholder: "搜索技能名或标识符",
               value: query,
               allowClear: true,
               style: { width: 260 },
@@ -925,11 +925,11 @@ whenHost((paw) => {
                 onChange: (e) => setName(e.target.value),
               })
             : null,
-          h(Text, null, "slug（可选）"),
+          h(Text, null, "标识符（可选）"),
           Input
             ? h(Input, {
                 value: slug,
-                placeholder: "默认由名称推导",
+                placeholder: "默认由名称推导（英文/拼音）",
                 style: { width: 200 },
                 onChange: (e) => setSlug(e.target.value),
               })
@@ -1005,7 +1005,7 @@ whenHost((paw) => {
       h(
         Paragraph,
         { type: "secondary", style: { marginTop: 12, marginBottom: 0 } },
-        "版本不可变：同一个 slug + 版本只能发布一次；下架与审核由管理员在市场后台处理。",
+        "版本不可变：同一个标识符 + 版本只能发布一次；下架与审核由管理员在市场后台处理。",
       ),
     );
   }

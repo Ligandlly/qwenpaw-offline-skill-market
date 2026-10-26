@@ -73,6 +73,17 @@ python3 deploy/scripts/build-plugin-zip.py      # 只要插件 -> dist/offline-m
    宿主机的局域网 IP 往往不通（发布端口只挂在 `127.0.0.1` 与网桥地址上），要用
    `host.docker.internal:8080` 或把后端容器接进同一 docker 网络用容器名。
 
+   **也可以直接把地址硬编码进插件**（内网一次性打包、不想逐个租户配 credentials 时）：
+   ```python
+   # plugin/offline_market/runtime.py 顶部
+   HARDCODED_MARKET_URL = "http://market.internal:8080"
+   ```
+   改完必须 `qwenpaw plugin install ./plugin --force` 重装（插件目录是副本，改源码不生效）。
+   非空时它**优先级最高**，会忽略插件配置 `market_url` 和 `OFFLINE_MARKET_URL`；留空则维持
+   常规顺序（`market_url` > `OFFLINE_MARKET_URL` > `http://localhost:8080`）。地址同样必须与
+   后端 `MARKET_PUBLIC_URL` 逐字符相同；生效值可用 `GET /api/offline-market/config` 的
+   `market_url` 确认。
+
 详见 [`docs/OPS.md`](docs/OPS.md)。
 
 ## 验收
