@@ -1,0 +1,31 @@
+# -*- coding: utf-8 -*-
+# 开发/测试依赖 —— 只用于本仓库的本地开发与 CI，**不是**插件的运行时依赖。
+#
+# 重要：plugin/ 下的代码是纯 stdlib（见 plugin/README.md），内网机器装插件
+# 不需要任何 pip 包，插件 zip 里也不带 requirements.txt。所以这个文件放在
+# 仓库根目录，绝不能挪进 plugin/（deploy/scripts/build-plugin-zip.py 会把
+# plugin/ 里除 tests/、__pycache__ 之外的文件全部打进包）。
+#
+# 用法（建议 3.12，与 CI 一致）：
+#   python3.12 -m venv .venv
+#   .venv/bin/python -m pip install -r requirements-dev.txt
+#   cd plugin && python -m pytest -q          # 57 项，不需要宿主、不需要网络
+#   python -m compileall -q plugin/offline_market plugin/backend.py
+#
+# QwenPaw 本体（qwenpaw==2.2.2）不在这个文件里：它只在跑真实宿主的 spike
+# 时需要，且会拖进 84 个依赖，单独装到 spikes/.venv（见 spikes/README.md）。
+
+# --- 单元测试 -------------------------------------------------------------
+# plugin/tests/* 直接 asyncio.run，不需要 pytest-asyncio。
+pytest>=8.0,<9
+
+# --- 路由层测试 -----------------------------------------------------------
+# plugin/tests/{conftest,test_routes}.py 用 fastapi + TestClient(httpx)。
+# 插件运行时只在宿主里 import fastapi，故此处仅测试用。
+fastapi>=0.110
+httpx>=0.27
+
+# --- 浏览器端到端验证（可选） ---------------------------------------------
+# spikes/m3_verify.py、spikes/v_frontend.py、deploy/scripts/e2e.py 用同步 API。
+# 装完还得拉浏览器：python -m playwright install chromium
+playwright>=1.44

@@ -37,6 +37,12 @@ cd plugin && python -m pytest
 qwenpaw plugin install ./plugin
 ```
 
+Python 侧只有开发/测试依赖（插件本身纯 stdlib，内网装插件不需要 pip 包）：
+
+```bash
+python3 -m venv .venv && .venv/bin/python -m pip install -r requirements-dev.txt
+```
+
 一键离线包：
 
 ```bash
