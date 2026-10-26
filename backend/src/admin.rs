@@ -199,6 +199,9 @@ pub async fn list_skills(
         SELECT s.slug, s.name, s.owner_tenant, t.display_name AS owner_name,
                s.visibility, s.latest_version,
                s.created_at, s.withdrawn_at, s.takedown_at, s.takedown_reason,
+               (SELECT json_extract(v.bundle_json, '$."SKILL.md"')
+                  FROM skill_versions v
+                 WHERE v.slug = s.slug AND v.version = s.latest_version) AS manifest,
                COALESCE((SELECT COUNT(*) FROM skill_versions v WHERE v.slug = s.slug), 0) AS versions,
                COALESCE((SELECT SUM(size_bytes) FROM skill_versions v WHERE v.slug = s.slug), 0) AS size_bytes
         FROM skills s
@@ -364,6 +367,7 @@ fn row_to_admin_skill(row: &rusqlite::Row<'_>, public_url: &str) -> rusqlite::Re
         name: row.get("name")?,
         owner_tenant: row.get("owner_tenant")?,
         owner_name: row.get("owner_name")?,
+        description: crate::api::row_description(row)?,
         visibility: row.get("visibility")?,
         latest_version: row.get("latest_version")?,
         created_at: row.get("created_at")?,

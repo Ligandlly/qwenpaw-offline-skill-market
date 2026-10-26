@@ -308,6 +308,50 @@ async fn versions_are_immutable_and_latest_only_moves_forward() {
 }
 
 #[tokio::test]
+async fn listings_carry_the_manifest_description() {
+    let h = Harness::new();
+    h.publish("tenant-a", "demo", "1.0.0", "public").await;
+
+    let (_s, listing, _) = h
+        .call("GET", "/api/v1/skills?q=demo", Some("tenant-b"), None, None)
+        .await;
+    let item = listing["items"].as_array().unwrap()[0].clone();
+    assert_eq!(item["description"], "a demo skill");
+
+    // the owner plane and the admin plane show the same line
+    let (_s, mine, _) = h
+        .call("GET", "/api/v1/skills/mine", Some("tenant-a"), None, None)
+        .await;
+    assert_eq!(mine["items"][0]["description"], "a demo skill");
+    let cookie = h.login().await;
+    let (status, admin, _) = h
+        .call("GET", "/admin/api/skills", None, None, Some(&cookie))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(admin["items"][0]["description"], "a demo skill");
+
+    // and it follows the latest version, not the first one published
+    let (status, body, _) = h
+        .call(
+            "POST",
+            "/api/v1/skills",
+            Some("tenant-a"),
+            Some(json!({
+                "name": "Skill demo", "slug": "demo", "version": "2.0.0",
+                "visibility": "public",
+                "files": { "SKILL.md": "---\nname: demo\ndescription: second take\n---\n" }
+            })),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let (_s, listing, _) = h
+        .call("GET", "/api/v1/skills?q=demo", Some("tenant-b"), None, None)
+        .await;
+    assert_eq!(listing["items"][0]["description"], "second take");
+}
+
+#[tokio::test]
 async fn private_skills_are_fail_closed() {
     let h = Harness::new();
     h.publish("tenant-a", "secret", "1.0.0", "tenant").await;

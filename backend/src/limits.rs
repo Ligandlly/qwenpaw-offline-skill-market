@@ -278,6 +278,16 @@ fn manifest_meta(content: &str) -> Result<(String, String), Reject> {
     Ok((name, description))
 }
 
+/// Frontmatter `description`, for the listings' 描述 column (the host shows the
+/// same line in its own 已安装 list). `None` when the stored SKILL.md is not
+/// what [`check_bundle`] accepted — an unparsable manifest is a display gap,
+/// never an error on a read path.
+pub fn manifest_description(content: &str) -> Option<String> {
+    manifest_meta(content)
+        .ok()
+        .map(|(_, description)| description)
+}
+
 fn unquote(value: &str) -> String {
     let bytes = value.as_bytes();
     if bytes.len() >= 2 {

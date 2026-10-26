@@ -285,7 +285,7 @@ whenHost((paw) => {
   const React = paw.host.React;
   const antd = paw.host.antd || {};
   const h = React.createElement;
-  const { useEffect, useState, useCallback, useMemo } = React;
+  const { useEffect, useState, useCallback, useMemo, useRef } = React;
 
   // antd is expected; the fallbacks keep the page usable in a stripped console.
   const Card = antd.Card || ((props) => h("section", props, props.children));
@@ -463,6 +463,8 @@ whenHost((paw) => {
                 onDone({
                   type: "success",
                   text: `已安装 ${(status.result && status.result.name) || item.slug}`,
+                  // lets the market list flip this row to 已安装 without a reload
+                  slug: item.slug,
                 });
               return;
             }
@@ -493,11 +495,92 @@ whenHost((paw) => {
 
   // ------------------------------------------------------------------ tabs ---
 
+  /**
+   * Which market rows are already installed on this agent.
+   *
+   * The host's skill list only reports display names, and a hub install always
+   * shows up as `source: "customized"`; the only real evidence is
+   * `/skills/{name}.installed_from` — a detail call that costs 2~3s each behind
+   * the hub proxy. So: one cheap list call, then confirm only the market rows
+   * the host actually has (i.e. the installed ones), instead of the whole
+   * catalogue fan-out the 已安装 tab needs. Positives are cached for the tab's
+   * lifetime; a failure is not: the buttons stay clickable and the host's own
+   * install call still refuses a duplicate.
+   */
+  function useInstalledSlugs(items) {
+    const [slugs, setSlugs] = useState(() => new Set());
+    const confirmed = useRef(new Set()); // display names verified as ours
+    const marked = useRef(new Set()); // slugs installed from this page
+
+    useEffect(() => {
+      let alive = true;
+      if (!items.length) {
+        setSlugs(new Set());
+        return undefined;
+      }
+      (async () => {
+        try {
+          const listed = await getJson("/skills");
+          const skills = Array.isArray(listed) ? listed : listed.items || [];
+          const onHost = skills.filter((item) => item.source !== "builtin");
+          const names = new Set(onHost.map((item) => item.name));
+          const unknown = items.filter(
+            (item) => item.name && names.has(item.name) && !confirmed.current.has(item.name),
+          );
+          logger.debug(
+            `已安装检查：宿主非 builtin ${onHost.length} 个，市场共 ${items.length} 条，待确认 ${unknown.length} 条`,
+          );
+          await Promise.all(
+            unknown.map(async (item) => {
+              // one unreadable skill must not hide the rest
+              const detail = await getJson(`/skills/${encodeURIComponent(item.name)}`).catch(
+                () => null,
+              );
+              if (detail && detail.installed_from === PLUGIN_ID) confirmed.current.add(item.name);
+            }),
+          );
+          if (!alive) return;
+          const next = new Set();
+          items.forEach((item) => {
+            if (marked.current.has(item.slug) || confirmed.current.has(item.name)) {
+              next.add(item.slug);
+            }
+          });
+          logger.debug(`已安装检查完成：市场里已安装 ${next.size} 条`, [...next]);
+          setSlugs(next);
+        } catch (err) {
+          logger.warn("已安装检查失败（按钮照旧可点，重复安装由宿主自身拦）", err);
+        }
+      })();
+      return () => {
+        alive = false;
+      };
+    }, [items]);
+
+    const mark = useCallback((slug) => {
+      if (!slug) return;
+      marked.current.add(slug);
+      setSlugs((prev) => (prev.has(slug) ? prev : new Set(prev).add(slug)));
+    }, []);
+
+    return [slugs, mark];
+  }
+
   function MarketTab({ limits, onNotice, refreshToken, tenant }) {
     const [items, setItems] = useState([]);
     const [query, setQuery] = useState("");
     const [loading, setLoading] = useState(false);
-    const installer = useInstaller(onNotice);
+    const [installed, markInstalled] = useInstalledSlugs(items);
+    // Local to the list: notify the page, and remember the row just installed
+    // so it turns 已安装 immediately instead of after a reload.
+    const onInstallDone = useCallback(
+      (notice) => {
+        onNotice(notice);
+        if (notice && notice.type === "success" && notice.slug) markInstalled(notice.slug);
+      },
+      [onNotice, markInstalled],
+    );
+    const installer = useInstaller(onInstallDone);
 
     const load = useCallback(
       async (value) => {
@@ -547,6 +630,14 @@ whenHost((paw) => {
               h(Text, { type: "secondary", code: true }, `${row.slug}@${row.latest_version || "-"}`),
             ),
         },
+        // Same column as 已安装: the backend parses it out of the latest
+        // version's SKILL.md frontmatter, so both lists read alike.
+        {
+          title: "描述",
+          dataIndex: "description",
+          ellipsis: true,
+          render: (value) => value || h(Text, { type: "secondary" }, "—"),
+        },
         {
           title: "可见性",
           dataIndex: "visibility",
@@ -572,20 +663,23 @@ whenHost((paw) => {
           title: "操作",
           width: 150,
           render: (_, row) =>
-            h(
-              Button,
-              {
-                type: "primary",
-                size: "small",
-                loading: installer.busySlug === row.slug,
-                disabled: Boolean(installer.busySlug) && installer.busySlug !== row.slug,
-                onClick: () => installer.install(row),
-              },
-              "安装",
-            ),
+            installed.has(row.slug)
+              ? // antd's disabled button is the greyed-out 已安装 state
+                h(Button, { size: "small", disabled: true, title: "已安装" }, "已安装")
+              : h(
+                  Button,
+                  {
+                    type: "primary",
+                    size: "small",
+                    loading: installer.busySlug === row.slug,
+                    disabled: Boolean(installer.busySlug) && installer.busySlug !== row.slug,
+                    onClick: () => installer.install(row),
+                  },
+                  "安装",
+                ),
         },
       ],
-      [installer],
+      [installer, installed],
     );
 
     return h(

@@ -80,6 +80,9 @@ type ApiResult<T> = Result<T, ApiError>;
 pub struct SkillRow {
     pub slug: String,
     pub name: String,
+    /// `description` from the latest version's `SKILL.md` frontmatter, so the
+    /// 市场 listing can show the same 描述 the host shows for installs.
+    pub description: Option<String>,
     pub owner_tenant: String,
     /// Publisher name the tenant reported, or `null` for skills published
     /// before anyone reported one. Display only; never used for access.
@@ -104,6 +107,7 @@ fn row_to_skill(row: &Row<'_>, public_url: &str) -> rusqlite::Result<SkillRow> {
     Ok(SkillRow {
         slug,
         name: row.get("name")?,
+        description: row_description(row)?,
         owner_tenant: row.get("owner_tenant")?,
         owner_name: row.get("owner_name")?,
         visibility: row.get("visibility")?,
@@ -118,10 +122,26 @@ fn row_to_skill(row: &Row<'_>, public_url: &str) -> rusqlite::Result<SkillRow> {
     })
 }
 
+/// Description for a row produced by a select carrying the `manifest` column
+/// (see [`SKILL_SELECT`]).
+pub(crate) fn row_description(row: &Row<'_>) -> rusqlite::Result<Option<String>> {
+    Ok(row
+        .get::<_, Option<String>>("manifest")?
+        .as_deref()
+        .and_then(limits::manifest_description))
+}
+
+/// `description` is not a column on purpose: it lives in the latest version's
+/// `SKILL.md`, which is the only source that cannot fall out of sync — and it
+/// works for rows published before the column existed. The key needs quoting:
+/// `$.SKILL.md` would be read as a nested path.
 const SKILL_SELECT: &str = r#"
 SELECT s.slug, s.name, s.owner_tenant, t.display_name AS owner_name, s.visibility,
        s.latest_version,
        s.created_at, s.withdrawn_at, s.takedown_at, s.takedown_reason,
+       (SELECT json_extract(v.bundle_json, '$."SKILL.md"')
+          FROM skill_versions v
+         WHERE v.slug = s.slug AND v.version = s.latest_version) AS manifest,
        COALESCE((SELECT COUNT(*) FROM skill_versions v WHERE v.slug = s.slug), 0) AS versions,
        COALESCE((SELECT SUM(size_bytes) FROM skill_versions v WHERE v.slug = s.slug), 0) AS size_bytes
 FROM skills s
