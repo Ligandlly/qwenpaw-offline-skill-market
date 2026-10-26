@@ -251,6 +251,47 @@ async fn publish_list_and_download_roundtrip() {
 }
 
 #[tokio::test]
+async fn binary_assets_publish_and_download_unchanged() {
+    let h = Harness::new();
+    let (status, body, _) = h
+        .call(
+            "POST",
+            "/api/v1/skills",
+            Some("tenant-a"),
+            Some(json!({
+                "name": "With assets",
+                "slug": "with-assets",
+                "version": "1.0.0",
+                "visibility": "public",
+                "files": {
+                    "SKILL.md": GOOD_MANIFEST,
+                    "references/manual.pdf": { "base64": "JVBERi0xLjcA//4=" }
+                }
+            })),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+
+    let (status, bundle, _) = h
+        .call(
+            "GET",
+            "/skills/with-assets/1.0.0",
+            Some("tenant-b"),
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{bundle}");
+    // text stays a plain string, binary keeps its explicit encoding
+    assert!(bundle["files"]["SKILL.md"].is_string());
+    assert_eq!(
+        bundle["files"]["references/manual.pdf"],
+        json!({ "base64": "JVBERi0xLjcA//4=" })
+    );
+}
+
+#[tokio::test]
 async fn versions_are_immutable_and_latest_only_moves_forward() {
     let h = Harness::new();
     h.publish("tenant-a", "demo", "1.0.0", "public").await;

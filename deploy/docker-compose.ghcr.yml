@@ -4,10 +4,11 @@
 #
 # 镜像由 .github/workflows/backend-image.yml 构建推送：
 #   ghcr.io/ligandlly/qwenpaw-offline-skill-market:latest   （main 分支）
-#   ghcr.io/ligandlly/qwenpaw-offline-skill-market:v0.1.0  （tag）
+#   ghcr.io/ligandlly/qwenpaw-offline-skill-market:v0.1.2  （tag）
 #
 # 离线机器：先在有网的机器上 docker pull + docker save，拷过去 docker load。
+# 这里不写 pull_policy（compose 默认 missing）：本地已有镜像就不会尝试联网拉取；
+# 写 always 会让离线机器直接失败。
 services:
   market:
     image: ghcr.io/ligandlly/qwenpaw-offline-skill-market:latest
-    pull_policy: always

@@ -19,8 +19,8 @@
 
 | 目录 | 内容 |
 | --- | --- |
-| `backend/` | 市场后端：Rust + axum + rusqlite（SQLite bundled），21 个测试 |
-| `plugin/` | QwenPaw 2.2.2 插件：市场 provider + 自用 HTTP 路由 + 侧边栏页面，57 个测试 |
+| `backend/` | 市场后端：Rust + axum + rusqlite（SQLite bundled），31 个测试 |
+| `plugin/` | QwenPaw 2.2.2 插件：市场 provider + 自用 HTTP 路由 + 侧边栏页面，64 个测试 |
 | `deploy/` | docker-compose / systemd / 离线打包 / preflight / 端到端验收脚本 |
 | `docs/` | `OPS.md` 部署运维手册、`ACCEPTANCE.md` 验收标准 |
 | `spikes/` | M0 阶段对 2.2.2 的实证结论（11 条），以及浏览器验证脚本 |
@@ -100,13 +100,13 @@ python3 deploy/scripts/preflight.py --market-url ... --runtimes-dir ... --app-ur
 | --- | --- | --- |
 | `backend.yml` | 改动 `backend/**`、推 tag `v*`、手动 | `cargo fmt --check` → `clippy -D warnings` → `cargo test --all-targets` → release 构建 → 上传 artifact；**推 `v*` tag 时自动建 Release 并附二进制 tarball + sha256** |
 | `backend-image.yml` | 改动 `backend/**`、推 tag `v*`、手动 | 跑一遍测试 → 构建后端镜像（linux/amd64）→ **推 ghcr.io** → 导出 `docker save` tarball 上传 artifact（tag 时也挂到 Release）；PR 只构建不推送 |
-| `plugin.yml` | 改动 `plugin/**`、手动 | `pytest`（57 项，不装 QwenPaw、不联网）+ `compileall` |
+| `plugin.yml` | 改动 `plugin/**`、手动 | `pytest`（64 项，不装 QwenPaw、不联网）+ `compileall` |
 | `plugin-package.yml` | 改动 `plugin/**`、推 tag `v*`、手动 | `pytest` → 打离线插件 zip（`dist/offline-market-plugin-<ver>-linux-x86_64.zip` + sha256）→ 解压后 `compileall` 复验 → 上传 artifact（tag 时挂到 Release） |
 
 发一个版本：
 
 ```bash
-git tag v0.1.0 && git push origin v0.1.0
+git tag v0.1.2 && git push origin v0.1.2
 # → Release 里会多出 offline-market-backend-<ver>-linux-x86_64.tar.gz(.sha256)
 #   以及 offline-market-image-<ver>-linux-amd64.tar(.sha256)
 #   以及 offline-market-plugin-<ver>-linux-x86_64.zip(.sha256)
@@ -116,7 +116,7 @@ git tag v0.1.0 && git push origin v0.1.0
 
 ```bash
 docker pull ghcr.io/ligandlly/qwenpaw-offline-skill-market:latest   # main 分支
-docker pull ghcr.io/ligandlly/qwenpaw-offline-skill-market:v0.1.0  # tag
+docker pull ghcr.io/ligandlly/qwenpaw-offline-skill-market:v0.1.2  # tag
 # 内网机器：在有网的机器上 docker save，拷过去 docker load
 ```
 

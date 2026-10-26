@@ -34,9 +34,11 @@ docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.ghcr.yml up
 ```
 
 镜像由 `.github/workflows/backend-image.yml` 推：`ghcr.io/ligandlly/qwenpaw-offline-skill-market`
-（`:latest` = main 分支，`:v0.1.0` = tag）。完全离线的机器连 ghcr 也访问不了时，
+（`:latest` = main 分支，`:v0.1.2` = tag）。完全离线的机器连 ghcr 也访问不了时，
 在有网的机器上 `docker pull` + `docker save`，把 tarball 拷进去 `docker load`，
-再用 `docker-compose.ghcr.yml` 把 `image:` 改成那个本地 tag。
+然后直接用 `docker-compose.ghcr.yml` 起就行：它没有 `pull_policy: always`，
+本地已有同名镜像时 compose 不会联网拉取（默认 `pull_policy: missing`）。
+如果 load 时换成了本地 tag，再把 `image:` 改成那个 tag。
 
 `.env` **必须与 `docker-compose.yml` 同目录（`deploy/`）**：compose 的 `env_file: .env`
 与 `${VAR}` 插值都以 compose 文件所在目录为基准（`docker compose config` 实测：
@@ -367,7 +369,7 @@ curl -s -H "x-tenant-id: <租户id>" http://<市场地址>:8080/api/v1/skills?li
 | `X-Tenant-Id` 是信任不是认证 | 后端必须只在内网暴露；能访问内网的人可以伪造租户 |
 | 审计只到租户 | 一租户一人的前提下等于到人；多用户租户需要再加身份 |
 | 限额改动需重启 | 环境变量是唯一来源 |
-| 发布是文本文件 | 后端 bundle 契约是 `{路径: 文本}`：Web 端上传 `.zip` 后由插件解压成文本，非 UTF-8 文件会被明确拒绝（二进制附件目前发不了） |
+| 二进制可发布但不能经 hub 安装 | 市场接受 `docx`/`pptx` 等附件（JSON 用 `{"base64":...}` 传输），但 QwenPaw 2.2.2 的 hub 安装只按文本写盘；含非 UTF-8 文件的技能安装时插件会明确报 `binary_bundle`，不会写出损坏文件 |
 
 ---
 

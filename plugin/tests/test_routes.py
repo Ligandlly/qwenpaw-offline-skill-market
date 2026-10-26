@@ -18,7 +18,7 @@ from offline_market.routes import build_router  # noqa: E402
 from offline_market.runtime import PluginSettings  # noqa: E402
 
 
-def make_zip(entries: dict[str, str]) -> bytes:
+def make_zip(entries: dict[str, str | bytes]) -> bytes:
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
         for name, data in entries.items():
@@ -84,6 +84,21 @@ def test_publish_forwards_visibility_and_rejects_bad_files(api, env, backend):
     assert bad.status_code == 400
     assert bad.json()["detail"]["code"] == "invalid_files"
 
+    # Binary is `{"base64": ...}`; a text-looking object with other keys is not.
+    binary = api.post(
+        "/offline-market/skills",
+        json={
+            "name": "Demo",
+            "version": "1.0.0",
+            "files": {
+                "SKILL.md": "---\nname: demo\ndescription: x\n---\n",
+                "assets/doc.pdf": {"data": "nope"},
+            },
+        },
+    )
+    assert binary.status_code == 400
+    assert binary.json()["detail"]["code"] == "invalid_files"
+
     missing = api.post(
         "/offline-market/skills", json={"name": "Demo", "files": {"SKILL.md": "#"}}
     )
@@ -117,6 +132,24 @@ def test_publish_zip_extracts_the_archive_and_forwards_the_files(api, env, backe
         "SKILL.md": "---\nname: demo\ndescription: x\n---\n",
         "scripts/run.py": "print(1)\n",
     }
+
+
+def test_publish_zip_forwards_binary_files_as_base64(api, env, backend):
+    backend.on("POST", "/api/v1/skills", 201, {"slug": "demo", "version": "1.0.0"})
+    pdf = b"%PDF-1.7\x00\xff\xfe"
+    response = api.post(
+        "/offline-market/skills/zip?name=Demo&version=1.0.0",
+        content=make_zip(
+            {
+                "SKILL.md": "---\nname: demo\ndescription: x\n---\n",
+                "references/manual.pdf": pdf,
+            }
+        ),
+        headers={"content-type": "application/zip"},
+    )
+    assert response.status_code == 200
+    sent = backend.requests[-1]["body"]["files"]
+    assert sent["references/manual.pdf"] == {"base64": "JVBERi0xLjcA//4="}
 
 
 def test_publish_zip_rejects_broken_archives_and_missing_fields(api, env, backend):

@@ -3,7 +3,7 @@
 离线技能市场的 QwenPaw 插件。**只做三件事**：让宿主原生 Skills 页认得这个市场、给自己的侧边栏页面提供 HTTP 路由、（M3）渲染那个页面。安装、校验、扫描、落盘全由宿主完成。
 
 ```bash
-python -m pytest          # 57 个测试，不需要宿主、不需要网络
+python -m pytest          # 64 个测试，不需要宿主、不需要网络
 ```
 
 ## 装机
@@ -140,9 +140,12 @@ class OfflineMarketProvider:          # MarketProvider + MarketInstallProvider
 
 ### 发布用的压缩包规则
 
-页面上传一个 `.zip`，插件在 runtime 内解压成后端要的 `{路径: 文本}`：
+页面上传一个 `.zip`，插件在 runtime 内解压成后端的 `{路径: 内容}` 映射：
 
-- **文本文件**：后端 bundle 契约就是 `{路径: 字符串}`，非 UTF-8 文件会被明确拒绝（不是静默乱码）
+- **文本与二进制**：UTF-8 文本原样传输；`docx`/`pptx`/图片等非 UTF-8 文件自动转成
+  `{"base64": "..."}`，发布、存储、下载都不再拒绝（后端会按解码后的真实字节算限额与 sha256）
+- **安装限制**：QwenPaw 2.2.2 的 hub 安装把 `files` 的每个值都当文本写盘，因此含非 UTF-8
+  附件的技能无法通过宿主的「市场安装」落盘；插件会明确报 `binary_bundle`，不会写出损坏文件
 - 根目录必须有 `SKILL.md`；如果压缩的是整个技能文件夹，唯一的顶层目录会被自动去掉
 - 自动跳过 macOS/Windows 的系统垃圾：`__MACOSX/`、`.DS_Store`、`Thumbs.db`、`desktop.ini`
 - 拒绝：`..`/绝对路径/盘符、符号链接、加密条目、重名条目
@@ -162,8 +165,8 @@ class OfflineMarketProvider:          # MarketProvider + MarketInstallProvider
 | GET | `/mine` | 我发布的（含已撤回） |
 | GET | `/skills/{slug}/status` | `active` / `withdrawn` / `taken_down` |
 | GET | `/lookup?names=a,b` | 展示名 → `slug` + 状态（含已下架），"已安装"页用 |
-| POST | `/skills` | 发布（JSON）：`{name, version, files:{路径:文本}, slug?, visibility?}`，供 API/脚本使用 |
-| POST | `/skills/zip?name=&version=&slug=&visibility=` | 发布（压缩包）：请求体是 `.zip` 原始字节，插件解压成 `{路径:文本}` 后转发 |
+| POST | `/skills` | 发布（JSON）：`{name, version, files:{路径:文本 或 {"base64":...}}, slug?, visibility?}`，供 API/脚本使用 |
+| POST | `/skills/zip?name=&version=&slug=&visibility=` | 发布（压缩包）：请求体是 `.zip` 原始字节，插件解压后把文本/二进制分别编码转发 |
 | POST | `/skills/{slug}/withdraw` | 撤回（可恢复） |
 | POST | `/skills/{slug}/restore` | 恢复（被管理员下架的不可恢复，409） |
 
@@ -177,10 +180,10 @@ backend.py                   # 导出 plugin 对象 + register(api)
 offline_market/
   runtime.py                 # 配置解析 + 扫描闸门（纯本地、可测）
   client.py                  # stdlib urllib 客户端，transport 可注入
-  bundle.py                  # .zip -> {路径: 文本}：路径/符号链接/大小闸门（stdlib zipfile）
+  bundle.py                  # .zip -> {路径: 字节} -> 后端 JSON（文本/base64）：路径/符号链接/大小闸门
   provider.py                # MarketProvider / MarketInstallProvider 实现
   routes.py                  # 自用 HTTP 路由（fastapi 延迟导入）
-tests/                       # 57 个测试：闸门、映射、错误透传、传输层异常、路由、解压
+tests/                       # 64 个测试：闸门、映射、错误透传、传输层异常、路由、解压
 ```
 
 ## 实测链路（本机，backend 8099 + qwenpaw 8123）

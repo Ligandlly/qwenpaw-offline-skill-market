@@ -1,14 +1,15 @@
 # -*- coding: utf-8 -*-
-"""`extract_zip`: archive bytes -> the backend's {path: text} bundle map."""
+"""`extract_zip`: archive bytes -> raw file bytes; `wire_files`: JSON map."""
 
 from __future__ import annotations
 
+import base64
 import io
 import zipfile
 
 import pytest
 
-from offline_market.bundle import BundleError, extract_zip
+from offline_market.bundle import BundleError, extract_zip, wire_files
 
 MANIFEST = "---\nname: demo\ndescription: demo skill\n---\n\n# Demo\n"
 
@@ -31,7 +32,10 @@ def test_flat_archive_becomes_a_bundle():
     files = extract_zip(
         make_zip({"SKILL.md": MANIFEST, "scripts/run.py": "print(1)\n"})
     )
-    assert files == {"SKILL.md": MANIFEST, "scripts/run.py": "print(1)\n"}
+    assert files == {
+        "SKILL.md": MANIFEST.encode(),
+        "scripts/run.py": b"print(1)\n",
+    }
 
 
 def test_single_top_level_folder_is_stripped():
@@ -64,12 +68,12 @@ def test_os_junk_is_dropped():
             }
         )
     )
-    assert files == {"SKILL.md": MANIFEST}
+    assert files == {"SKILL.md": MANIFEST.encode()}
 
 
 def test_bom_is_stripped_so_frontmatter_survives():
     files = extract_zip(make_zip({"SKILL.md": ("\ufeff" + MANIFEST).encode("utf-8")}))
-    assert files["SKILL.md"].startswith("---")
+    assert wire_files(files)["SKILL.md"].startswith("---")
 
 
 @pytest.mark.parametrize(
@@ -131,12 +135,20 @@ def test_duplicate_entries_are_rejected():
     assert code_of(buffer.getvalue()) == "duplicate_entry"
 
 
-def test_binary_files_are_rejected_with_a_useful_message():
-    archive = make_zip({"SKILL.md": MANIFEST, "icon.png": b"\x89PNG\r\n\x1a\n\xff\xfe"})
-    with pytest.raises(BundleError) as caught:
-        extract_zip(archive)
-    assert caught.value.code == "not_text"
-    assert "icon.png" in str(caught.value)
+def test_binary_files_are_kept_and_base64_encoded_for_the_backend():
+    raw = b"\x89PNG\r\n\x1a\n\xff\xfe"
+    files = extract_zip(make_zip({"SKILL.md": MANIFEST, "icon.png": raw}))
+    assert files["icon.png"] == raw
+    wired = wire_files(files)
+    assert wired["SKILL.md"] == MANIFEST
+    assert wired["icon.png"] == {"base64": base64.b64encode(raw).decode("ascii")}
+
+
+def test_docx_like_payload_is_publishable():
+    docx = b"PK\x03\x04" + bytes(range(256))
+    wired = wire_files(extract_zip(make_zip({"SKILL.md": MANIFEST, "docs/spec.docx": docx})))
+    assert wired["docs/spec.docx"]["base64"]
+    assert base64.b64decode(wired["docs/spec.docx"]["base64"]) == docx
 
 
 def test_missing_or_broken_archives():

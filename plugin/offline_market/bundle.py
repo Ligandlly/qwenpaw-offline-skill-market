@@ -1,11 +1,14 @@
 # -*- coding: utf-8 -*-
-"""Turn an uploaded ``.zip`` into the backend's bundle map: ``{path: text}``.
+"""Turn an uploaded ``.zip`` into the backend's bundle map.
 
-The market backend only accepts text (``files: {path: String}``), so this module
-is where a zip becomes that map. It is deliberately *not* the distribution gate:
-the backend still enforces the real, configurable limits (file count, per-file
-and total size, path depth). The caps below only stop a small archive from
-exploding inside the tenant runtime before it ever reaches the backend.
+Files are kept as raw bytes here: skills legitimately ship ``.docx``/``.pptx``
+and images. :func:`wire_files` converts them to the backend's JSON contract —
+UTF-8 files as plain strings, everything else as ``{"base64": "..."}``.
+
+This module is deliberately *not* the distribution gate: the backend still
+enforces the real, configurable limits (file count, per-file and total size,
+path depth). The caps below only stop a small archive from exploding inside the
+tenant runtime before it ever reaches the backend.
 
 The plugin is stdlib-only by policy (plugins run in the host's venv), hence
 ``zipfile`` and no yaml/zip dependencies.
@@ -13,6 +16,7 @@ The plugin is stdlib-only by policy (plugins run in the host's venv), hence
 
 from __future__ import annotations
 
+import base64
 import io
 import stat
 import zipfile
@@ -40,8 +44,8 @@ class BundleError(ValueError):
         self.code = code
 
 
-def extract_zip(data: bytes) -> dict[str, str]:
-    """``.zip`` bytes -> bundle files. Raises :class:`BundleError`."""
+def extract_zip(data: bytes) -> dict[str, bytes]:
+    """``.zip`` bytes -> ``{path: raw bytes}``. Raises :class:`BundleError`."""
     if not data:
         raise BundleError("empty_upload", "压缩包是空的")
     if len(data) > MAX_UPLOAD_BYTES:
@@ -74,8 +78,25 @@ def extract_zip(data: bytes) -> dict[str, str]:
 # --------------------------------------------------------------------- inner ---
 
 
-def _read_entries(archive: zipfile.ZipFile) -> list[tuple[str, str]]:
-    entries: list[tuple[str, str]] = []
+def wire_files(files: dict[str, bytes]) -> dict[str, str | dict[str, str]]:
+    """Raw files -> the backend's JSON map.
+
+    JSON cannot carry bytes, so the market accepts ``{"base64": "..."}`` for
+    payloads that are not valid UTF-8. Text is sent verbatim (with the BOM
+    stripped, as before), which keeps the common case readable and backwards
+    compatible with every existing API client.
+    """
+    out: dict[str, str | dict[str, str]] = {}
+    for path, raw in files.items():
+        try:
+            out[path] = raw.decode("utf-8-sig")
+        except UnicodeDecodeError:
+            out[path] = {"base64": base64.b64encode(raw).decode("ascii")}
+    return out
+
+
+def _read_entries(archive: zipfile.ZipFile) -> list[tuple[str, bytes]]:
+    entries: list[tuple[str, bytes]] = []
     seen: set[str] = set()
     total = 0
     for info in archive.infolist():
@@ -88,13 +109,13 @@ def _read_entries(archive: zipfile.ZipFile) -> list[tuple[str, str]]:
         if len(seen) > MAX_FILES:
             raise BundleError("too_many_files", f"压缩包文件数超过 {MAX_FILES}")
 
-        text = _read_entry(archive, info, path)
-        total += len(text.encode("utf-8"))
+        raw = _read_entry(archive, info, path)
+        total += len(raw)
         if total > MAX_TOTAL_BYTES:
             raise BundleError(
                 "bundle_too_large", f"解压后总大小超过 {MAX_TOTAL_BYTES} 字节上限"
             )
-        entries.append((path, text))
+        entries.append((path, raw))
     return entries
 
 
@@ -118,7 +139,7 @@ def _entry_path(info: zipfile.ZipInfo) -> str | None:
     return "/".join(segments)
 
 
-def _read_entry(archive: zipfile.ZipFile, info: zipfile.ZipInfo, path: str) -> str:
+def _read_entry(archive: zipfile.ZipFile, info: zipfile.ZipInfo, path: str) -> bytes:
     if info.flag_bits & 0x1:
         raise BundleError("encrypted_entry", f"{path}: 不支持加密的条目")
     if stat.S_ISLNK((info.external_attr >> 16) & 0xFFFF):
@@ -135,19 +156,12 @@ def _read_entry(archive: zipfile.ZipFile, info: zipfile.ZipInfo, path: str) -> s
     if len(raw) > MAX_FILE_BYTES:
         raise BundleError("file_too_large", f"{path}: 超过 {MAX_FILE_BYTES} 字节上限")
 
-    try:
-        # utf-8-sig also strips the BOM Windows editors like to add; a BOM would
-        # otherwise hide the leading '---' from the backend's frontmatter check.
-        return raw.decode("utf-8-sig")
-    except UnicodeDecodeError as exc:
-        raise BundleError(
-            "not_text",
-            f"{path}: 不是 UTF-8 文本。市场目前只分发文本文件"
-            "（后端 bundle 契约就是 {路径: 文本}）",
-        ) from exc
+    # Keep bytes as-is; wire_files() decides text vs base64. In particular this
+    # must not reject a .docx just because it is not UTF-8.
+    return raw
 
 
-def _strip_single_root(entries: list[tuple[str, str]]) -> dict[str, str]:
+def _strip_single_root(entries: list[tuple[str, bytes]]) -> dict[str, bytes]:
     """``my-skill/SKILL.md`` -> ``SKILL.md`` when the folder is the only root.
 
     Zipping a folder is the natural thing to do on every OS, and it produces one
@@ -164,4 +178,4 @@ def _strip_single_root(entries: list[tuple[str, str]]) -> dict[str, str]:
     if any("/" not in path for path, _ in entries):
         return dict(entries)
 
-    return {path.split("/", 1)[1]: text for path, text in entries}
+    return {path.split("/", 1)[1]: raw for path, raw in entries}

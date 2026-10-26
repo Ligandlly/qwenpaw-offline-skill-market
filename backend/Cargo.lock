@@ -405,10 +405,11 @@ dependencies = [
 
 [[package]]
 name = "offline-market-backend"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "argon2",
  "axum",
+ "base64ct",
  "http-body-util",
  "rand",
  "rusqlite",

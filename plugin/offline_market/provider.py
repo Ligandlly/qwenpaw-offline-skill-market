@@ -14,6 +14,7 @@ the host — this provider only answers "what exists" and "give me the files".
 from __future__ import annotations
 
 import asyncio
+import base64
 import time
 from dataclasses import dataclass
 
@@ -152,8 +153,49 @@ class OfflineMarketProvider:
 
         if not isinstance(body, dict) or not isinstance(body.get("files"), dict):
             raise BackendError(0, "bad_bundle", "市场后端返回的 bundle 结构不合法")
-        bundle = {"name": body.get("name") or slug, "files": body["files"]}
+        bundle = {
+            "name": body.get("name") or slug,
+            "files": _host_files(body["files"]),
+        }
         return bundle, body.get("source_url") or url
+
+
+def _host_files(files: dict) -> dict[str, str]:
+    """Backend wire map -> the host's `{path: str}` bundle contract.
+
+    QwenPaw 2.2.2's hub installer writes every value with
+    ``Path.write_text(..., encoding="utf-8")``, so binary attachments cannot be
+    installed through it. Refuse loudly instead of handing the host a base64
+    string and letting it write a corrupt ``.docx``.
+    """
+    out: dict[str, str] = {}
+    binary: list[str] = []
+    for path, value in files.items():
+        if not isinstance(path, str):
+            continue
+        if isinstance(value, str):
+            out[path] = value
+            continue
+        encoded = value.get("base64") if isinstance(value, dict) else None
+        if not isinstance(encoded, str):
+            raise BackendError(0, "bad_bundle", f"{path}: bundle 文件编码不合法")
+        try:
+            raw = base64.b64decode(encoded, validate=True)
+        except ValueError as exc:
+            raise BackendError(0, "bad_bundle", f"{path}: base64 解码失败") from exc
+        try:
+            out[path] = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            binary.append(path)
+    if binary:
+        sample = "、".join(binary[:3])
+        raise BackendError(
+            0,
+            "binary_bundle",
+            f"该技能包含非文本文件（{sample}）。QwenPaw 2.2.2 的 hub 安装只接受文本，"
+            "无法安装二进制附件。",
+        )
+    return out
 
 
 def _split_bundle_url(url: str) -> tuple[str, str]:

@@ -11,7 +11,7 @@
  * `provider_key: "offline-market"`, then poll `/status/{task_id}`.
  */
 const PLUGIN_ID = "offline-market";
-const PLUGIN_VERSION = "0.1.0"; // keep in sync with plugin.json
+const PLUGIN_VERSION = "0.1.2"; // keep in sync with plugin.json
 const PLUGIN_LABEL = "技能市场（内网）";
 const VISIBILITY_LABEL = { public: "公开", tenant: "仅本租户" };
 const STATE_LABEL = { active: "已上架", withdrawn: "已撤回", taken_down: "已下架" };

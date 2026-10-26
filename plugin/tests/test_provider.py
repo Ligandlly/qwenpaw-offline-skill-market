@@ -168,6 +168,27 @@ def test_fetch_bundle_rejects_malformed_payload(env, backend):
         asyncio.run(prov.fetch_bundle("http://market.test/skills/demo/1.0.0", "1.0.0"))
 
 
+def test_fetch_bundle_refuses_binary_attachments(env, backend):
+    """Hub install writes text; base64 must not silently become a corrupt file."""
+    backend.on(
+        "GET",
+        "/skills/demo/1.0.0",
+        200,
+        {
+            "name": "Demo",
+            "files": {
+                "SKILL.md": "---\nname: demo\ndescription: x\n---\n",
+                "docs/report.docx": {"base64": "UEsDBP/+AA=="},
+            },
+        },
+    )
+    prov = provider(backend)
+    with pytest.raises(BackendError) as excinfo:
+        asyncio.run(prov.fetch_bundle("http://market.test/skills/demo/1.0.0", "1.0.0"))
+    assert excinfo.value.code == "binary_bundle"
+    assert "report.docx" in str(excinfo.value)
+
+
 def test_fetch_bundle_propagates_takedown(env, backend):
     backend.on("GET", "/skills/demo/1.0.0", 410, {"error": {"code": "taken_down", "message": "gone"}})
     prov = provider(backend)

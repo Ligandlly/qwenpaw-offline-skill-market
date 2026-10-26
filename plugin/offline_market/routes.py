@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .bundle import BundleError, extract_zip
+from .bundle import BundleError, extract_zip, wire_files
 from .client import BackendClient, BackendError
 from .runtime import PluginSettings
 
@@ -107,15 +107,28 @@ def build_router(settings: PluginSettings):
                 )
         return name.strip(), version.strip()
 
+    def valid_file(value: Any) -> bool:
+        """Text is a plain string; binary is `{"base64": "..."}` (see bundle.py)."""
+        if isinstance(value, str):
+            return True
+        return (
+            isinstance(value, dict)
+            and set(value) == {"base64"}
+            and isinstance(value["base64"], str)
+        )
+
     @router.post("/skills")
     def publish(payload: dict = Body(...)) -> Any:
         files = payload.get("files")
         if not isinstance(files, dict) or not all(
-            isinstance(k, str) and isinstance(v, str) for k, v in files.items()
+            isinstance(k, str) and valid_file(v) for k, v in files.items()
         ):
             raise HTTPException(
                 status_code=400,
-                detail={"code": "invalid_files", "message": "files 必须是 {路径: 文本内容}"},
+                detail={
+                    "code": "invalid_files",
+                    "message": "files 必须是 {路径: 文本} 或 {路径: {'base64': ...}}",
+                },
             )
         name, version = required(
             str(payload.get("name") or ""), str(payload.get("version") or "")
@@ -146,7 +159,7 @@ def build_router(settings: PluginSettings):
         """
         name, version = required(name, version)
         try:
-            files = extract_zip(payload)
+            files = wire_files(extract_zip(payload))
         except BundleError as exc:
             raise HTTPException(
                 status_code=400,

@@ -98,9 +98,17 @@ $env:MARKET_PUBLIC_URL="http://10.137.157.214:8080"; cargo run
   "slug": "demo",
   "version": "1.0.0",
   "visibility": "public",
-  "files": { "SKILL.md": "---\nname: demo\ndescription: ...\n---\n", "scripts/hello.py": "print(1)\n" }
+  "files": {
+    "SKILL.md": "---\nname: demo\ndescription: ...\n---\n",
+    "scripts/hello.py": "print(1)\n",
+    "references/manual.pdf": { "base64": "JVBERi0xLjcA//4=" }
+  }
 }
 ```
+
+`files` 的值有两种形态：能按 UTF-8 解码的传普通字符串，二进制（docx/pptx/图片等）传
+`{"base64": "..."}`。内部一律按原始字节做限额、sha256 和存储；旧库里已有的纯文本
+`bundle_json` 不需要迁移，仍按文本读取。
 
 ## 管理面
 
@@ -141,9 +149,9 @@ WARN request rejected tenant=- method=GET path=/api/v1/skills status=401 ms=0.1
 docker build -t offline-market:0.1 .
 
 # 推送与导出（CI 里由 .github/workflows/backend-image.yml 做）
-docker tag offline-market:0.1 ghcr.io/ligandlly/qwenpaw-offline-skill-market:v0.1.0
-docker push ghcr.io/ligandlly/qwenpaw-offline-skill-market:v0.1.0
-docker save -o offline-market-image.tar ghcr.io/ligandlly/qwenpaw-offline-skill-market:v0.1.0
+docker tag offline-market:0.1.2 ghcr.io/ligandlly/qwenpaw-offline-skill-market:v0.1.2
+docker push ghcr.io/ligandlly/qwenpaw-offline-skill-market:v0.1.2
+docker save -o offline-market-image.tar ghcr.io/ligandlly/qwenpaw-offline-skill-market:v0.1.2
 
 # 离线机器：拷 tarball 过去
 docker load -i offline-market-image.tar

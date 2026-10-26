@@ -13,7 +13,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::auth::TenantId;
 use crate::db::{audit, now};
-use crate::limits::{self, Reject, MANIFEST};
+use crate::limits::{self, FileData, Reject, MANIFEST};
 use crate::state::Shared;
 
 // ---------------------------------------------------------------- errors ---
@@ -284,7 +284,7 @@ pub struct PublishRequest {
     /// console login. Cosmetic: it labels the listing, it grants nothing.
     #[serde(default)]
     pub publisher_name: Option<String>,
-    pub files: BTreeMap<String, String>,
+    pub files: BTreeMap<String, FileData>,
 }
 
 fn default_visibility() -> String {
@@ -788,7 +788,7 @@ pub async fn fetch_bundle(
         )
         .map_err(|_| ApiError::not_found("unknown version"))?;
 
-    let files: BTreeMap<String, String> = serde_json::from_str(&bundle_json).map_err(|err| {
+    let files: BTreeMap<String, FileData> = serde_json::from_str(&bundle_json).map_err(|err| {
         ApiError::new(
             StatusCode::INTERNAL_SERVER_ERROR,
             "corrupt_bundle",
@@ -801,7 +801,7 @@ pub async fn fetch_bundle(
         slug = %slug,
         version = %resolved,
         files = files.len(),
-        bytes = files.values().map(|content| content.len()).sum::<usize>(),
+        bytes = files.values().map(FileData::len).sum::<usize>(),
         "bundle fetched"
     );
     Ok(Json(json!({

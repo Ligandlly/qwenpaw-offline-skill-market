@@ -65,7 +65,7 @@ python3 deploy/scripts/preflight.py \
 - 多节点/水平扩展（SQLite 单机）。
 - 人工审核流程、智能体协同审核（PLAN 明示后续工作）。
 - 远程吊销已安装副本（PLAN 明示不做）。
-- 二进制文件发布（后端 bundle 是文本；zip 上传中的非 UTF-8 文件会被拒绝）。
+- 二进制附件经 hub 安装（市场可发布/存储/下载 `docx`/`pptx`，但 QwenPaw 2.2.2 的 hub 安装只接受文本；安装时会明确报 `binary_bundle`）。
 
 ## 7. 回归清单（改代码后至少跑这些）
 
