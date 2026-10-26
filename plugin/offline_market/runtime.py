@@ -32,6 +32,22 @@ UNKNOWN_MODE = "unknown"
 # deploy/docker-compose.yml publishes.
 DEFAULT_MARKET_URL = "http://localhost:8080"
 
+# ============================================================================
+# 硬编码入口：只改下面这一行，就能把市场地址写死进插件。
+#
+# 典型场景：内网打一次性插件包，不想给每个租户 runtime 配 hub credentials /
+# config.json。把 "" 改成后端地址（如 "http://10.137.157.214:8080"），
+# 重装插件（qwenpaw plugin install ./plugin --force）即可生效。
+#
+# 非空时优先级最高：config.json 的 plugins.offline-market.market_url 与
+# OFFLINE_MARKET_URL 都会被忽略。留空（默认）= 不覆盖，顺序仍是：
+#   plugin_config.market_url > OFFLINE_MARKET_URL > DEFAULT_MARKET_URL
+#
+# 地址必须与后端的 MARKET_PUBLIC_URL 逐字符相同（docs/OPS.md §2.1），
+# 否则安装会在宿主侧报 URL does not belong to Hub 'offline-market'。
+# ============================================================================
+HARDCODED_MARKET_URL = ""
+
 # Scan-mode config is re-read at most this often (seconds). Editing
 # config.json or the env is an operator action, not a hot loop.
 _SCAN_MODE_TTL = 30.0
@@ -113,6 +129,7 @@ class PluginSettings:
     @property
     def market_url(self) -> str:
         raw = _first(
+            HARDCODED_MARKET_URL,
             str(self.plugin_config.get("market_url") or ""),
             os.environ.get("OFFLINE_MARKET_URL"),
         ) or DEFAULT_MARKET_URL

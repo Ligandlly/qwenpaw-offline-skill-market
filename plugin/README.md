@@ -45,6 +45,10 @@ qwenpaw plugin list                    # ID: offline-market
 
 ## 运行时环境变量（每个租户 runtime 都必须有）
 
+> 不想配 env / config.json？改 `offline_market/runtime.py` 顶部的硬编码入口
+> `HARDCODED_MARKET_URL = "http://<market>"`，重装插件即可。非空时它优先级最高，
+> 会忽略 `config.json` 的 `market_url` 和 `OFFLINE_MARKET_URL`。
+
 | 变量 | 必需 | 说明 |
 | --- | --- | --- |
 | `OFFLINE_MARKET_URL` | 可选，默认 `http://localhost:8080` | 市场后端地址，如 `http://market.internal:8080`（也可用插件配置项 `market_url`，它优先）。**runtime 在容器里时，这个地址必须"从容器内可达"**（`host.docker.internal:8080` 或同网络容器名），见 `docs/OPS.md` §2.5 |

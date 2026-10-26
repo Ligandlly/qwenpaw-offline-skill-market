@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 
+from offline_market import runtime
 from offline_market.runtime import PluginSettings, resolve_scan_gate
 
 
@@ -92,3 +93,16 @@ def test_market_url_defaults_to_localhost(env):
 def test_default_market_url_is_trimmed_of_trailing_slash(env):
     env.setenv("OFFLINE_MARKET_URL", "http://market.test//")
     assert PluginSettings().market_url == "http://market.test"
+
+
+def test_hardcoded_market_url_wins_over_config_and_env(env, monkeypatch):
+    """The hardcoded entry is the operator's explicit last word."""
+    monkeypatch.setattr(runtime, "HARDCODED_MARKET_URL", "http://hardcoded.test/")
+    settings = PluginSettings({"market_url": "http://configured.test/"})
+    assert settings.market_url == "http://hardcoded.test"
+
+
+def test_blank_hardcoded_market_url_keeps_normal_precedence(env, monkeypatch):
+    monkeypatch.setattr(runtime, "HARDCODED_MARKET_URL", "   ")
+    settings = PluginSettings({"market_url": "http://configured.test/"})
+    assert settings.market_url == "http://configured.test"

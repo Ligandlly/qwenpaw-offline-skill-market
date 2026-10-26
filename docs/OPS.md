@@ -115,6 +115,11 @@ curl -X PUT http://<hub>/api/hub/credentials \
 也可以在插件配置里填 `market_url`，但它**优先级高于** `OFFLINE_MARKET_URL`（`plugin/offline_market/runtime.py`），
 逐个租户配、批量部署不划算。
 
+两者都不想配（比如内网一次性打包）：直接改插件源码 `offline_market/runtime.py` 顶部的
+`HARDCODED_MARKET_URL = "http://<market>"` 再重装插件。非空时它**优先级最高**，
+`config.json` 与 `OFFLINE_MARKET_URL` 都会被忽略；留空则维持常规顺序。
+生效地址可看 `GET /api/offline-market/config` 的 `market_url`。
+
 #### 不变式：`MARKET_PUBLIC_URL` ≡ `OFFLINE_MARKET_URL`
 
 两处地址必须**逐字符相等**（两边都会 trim 结尾 `/`；`http`/`https`、内网 IP/内网 DNS、
