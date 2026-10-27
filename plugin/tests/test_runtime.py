@@ -106,3 +106,15 @@ def test_blank_hardcoded_market_url_keeps_normal_precedence(env, monkeypatch):
     monkeypatch.setattr(runtime, "HARDCODED_MARKET_URL", "   ")
     settings = PluginSettings({"market_url": "http://configured.test/"})
     assert settings.market_url == "http://configured.test"
+
+
+def test_market_url_problem_flags_an_inner_space(env):
+    env.setenv("OFFLINE_MARKET_URL", "http://10 .10.145.48:8080")
+    settings = PluginSettings()
+    assert "空白" in settings.market_url_problem()
+    assert any("空白" in problem for problem in settings.problems())
+
+
+def test_market_url_problem_accepts_normal_ipv4(env):
+    env.setenv("OFFLINE_MARKET_URL", "http://10.10.145.48:8080")
+    assert PluginSettings().market_url_problem() is None

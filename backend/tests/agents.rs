@@ -669,3 +669,33 @@ async fn agent_status_reports_market_state() {
     assert_eq!(body["state"], "active");
     assert_eq!(body["latest_version"], "1.0.0");
 }
+
+#[tokio::test]
+async fn dashboard_counts_agents_and_their_downloads() {
+    let h = Harness::new();
+    h.publish_agent("tenant-a", "qa-agent", "1.0.0", "public")
+        .await;
+    for _ in 0..3 {
+        let (status, _, _) = h
+            .call(
+                "GET",
+                "/api/v1/agents/qa-agent/latest/bundle",
+                Some("tenant-b"),
+                None,
+                None,
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    let (status, stats, _) = h
+        .call("GET", "/api/v1/stats", Some("tenant-b"), None, None)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{stats}");
+    assert_eq!(stats["agents"]["total"], 1);
+    assert_eq!(stats["agents"]["new_this_month"], 1);
+    assert_eq!(stats["agents"]["downloads"], 3);
+    assert_eq!(stats["skills"]["total"], 0);
+    assert_eq!(stats["totals"]["agents"], 1);
+    assert_eq!(stats["totals"]["downloads"], 3);
+}

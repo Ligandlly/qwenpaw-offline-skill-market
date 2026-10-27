@@ -97,6 +97,9 @@ def backend() -> FakeBackend:
 def env(monkeypatch, tmp_path):
     """A runtime that looks like a healthy hub-managed tenant."""
     monkeypatch.setenv("OFFLINE_MARKET_URL", "http://market.test/")
+    # The hardcoded entry is a deployment switch (default empty). Keep tests
+    # independent of whatever address an operator baked into their checkout.
+    monkeypatch.setattr("offline_market.runtime.HARDCODED_MARKET_URL", "")
     monkeypatch.setenv("QWENPAW_TENANT_ID", "tenant-a")
     monkeypatch.setenv("QWENPAW_SKILL_SCAN_MODE", "block")
     monkeypatch.setenv("QWENPAW_CONFIG_PATH", str(tmp_path / "config.json"))

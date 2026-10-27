@@ -4,7 +4,7 @@ QwenPaw 2.2.2 离线技能市场的后端（Rust + axum + SQLite）。**不做�
 
 ```bash
 cargo run                 # 默认 0.0.0.0:8080, data/market.sqlite3
-cargo test                # 47 个测试（24 单测 + 23 集成）
+cargo test                # 51 个测试（24 单测 + 27 集成）
 ```
 
 首次启动若未设置 `ADMIN_PASSWORD`，会生成一次性管理员密码并打印一次。
@@ -81,6 +81,7 @@ $env:MARKET_PUBLIC_URL="http://10.137.157.214:8080"; cargo run
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | GET | `/api/v1/limits` | 插件据此对齐预检阈值，避免前后不一致 |
+| GET | `/api/v1/stats` | 概览聚合：可见技能/智能体总数、本月新增、累计下载（供插件「概览」页） |
 | GET | `/api/v1/skills?q=&page=&limit=` | 市场列表：公开 + 自己的私有；已撤回/已下架不出现（带 `owner_name`） |
 | GET | `/api/v1/skills/mine` | 自己的全部（含已撤回） |
 | GET | `/api/v1/skills/{slug}/status` | `active` / `withdrawn` / `taken_down`，用于"已安装但被下架"标记 |
@@ -149,9 +150,9 @@ WARN request rejected tenant=- method=GET path=/api/v1/skills status=401 ms=0.1
 docker build -t offline-market:0.1 .
 
 # 推送与导出（CI 里由 .github/workflows/backend-image.yml 做）
-docker tag offline-market:0.1.3 ghcr.io/ligandlly/qwenpaw-offline-skill-market:v0.1.3
-docker push ghcr.io/ligandlly/qwenpaw-offline-skill-market:v0.1.3
-docker save -o offline-market-image.tar ghcr.io/ligandlly/qwenpaw-offline-skill-market:v0.1.3
+docker tag offline-market:0.1.4 ghcr.io/ligandlly/qwenpaw-offline-skill-market:v0.1.4
+docker push ghcr.io/ligandlly/qwenpaw-offline-skill-market:v0.1.4
+docker save -o offline-market-image.tar ghcr.io/ligandlly/qwenpaw-offline-skill-market:v0.1.4
 
 # 离线机器：拷 tarball 过去
 docker load -i offline-market-image.tar
@@ -167,6 +168,7 @@ docker load -i offline-market-image.tar
 ## 语义（都有测试覆盖）
 
 - **版本不可变**：同 `slug+version` 二次发布 → 409 `version_exists`；`latest` 只前进不回退。
+- **下载量**：`skills.download_count` / `agents.download_count` 在 bundle 成功返回后自增；撤回/下架不会清零，`/api/v1/stats` 按「公开 + 本租户私有」汇总。升级前的历史下载无法回溯，从本版本开始计数。
 - **slug 归属**：别人已占用的 slug 发布 → 403，不能劫持。
 - **私有**：非属主列表不可见、下载 403、状态查询 404（fail-closed）。
 - **撤回 vs 下架**：撤回 = 属主行为，市场消失、他人 410、属主仍可取；下架 = 管理员行为，整包 410（含属主），且属主不能自恢复、不能再发布新版本覆盖。

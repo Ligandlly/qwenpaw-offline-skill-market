@@ -16,6 +16,7 @@ pub mod db;
 pub mod limits;
 pub mod log;
 pub mod state;
+pub mod stats;
 
 use axum::extract::DefaultBodyLimit;
 use axum::routing::{get, post};
@@ -38,6 +39,7 @@ pub fn router(app: Shared) -> Router {
         .route("/health", get(health))
         // ---- tenant plane ----
         .route("/api/v1/limits", get(api::get_limits))
+        .route("/api/v1/stats", get(stats::overview))
         .route("/api/v1/skills", get(api::list_skills).post(api::publish))
         .route("/api/v1/skills/mine", get(api::list_mine))
         .route("/api/v1/skills/lookup", get(api::lookup_skills))

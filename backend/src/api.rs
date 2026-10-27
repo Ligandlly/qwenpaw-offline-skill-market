@@ -816,6 +816,14 @@ pub async fn fetch_bundle(
         )
     })?;
 
+    if let Err(err) = db.execute(
+        "UPDATE skills SET download_count = download_count + 1 WHERE slug = ?1",
+        params![slug],
+    ) {
+        // A counter must never fail an install that already succeeded.
+        warn!(slug = %slug, error = %err, "download counter update failed");
+    }
+
     debug!(
         tenant = %tenant.0,
         slug = %slug,

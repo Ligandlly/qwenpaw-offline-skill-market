@@ -3,7 +3,7 @@
 离线市场的 QwenPaw 插件。**只做三件事**：让宿主原生 Skills 页认得这个市场、给自己的侧边栏页面提供 HTTP 路由（技能 + 智能体）、渲染那个页面。安装、校验、扫描、落盘全由宿主完成。
 
 ```bash
-python -m pytest          # 98 个测试，不需要宿主、不需要网络
+python -m pytest          # 107 个测试，不需要宿主、不需要网络
 ```
 
 ## 装机
@@ -100,13 +100,14 @@ class OfflineMarketProvider:          # MarketProvider + MarketInstallProvider
 
 ## 前端页面（M3）
 
-侧边栏「**内网市场**」，位置 `primary.agentScoped`、紧跟宿主内置的 `core.marketplace`；
-路由 `/offline-market`。页面顶部两个一级页签：
+侧边栏「**内网市场**」通过 `sider.top` 插槽渲染在 New Task 按钮正下方、**折叠菜单之外**（`primary.agentScoped` 的 `before: core.inbox` 仅作为旧宿主兜底）；
+路由 `/offline-market`。页面顶部三个一级页签：
 
 | 一级页签 | 内容 |
 | --- | --- |
 | 技能 | 原有的技能市场四页签（见下表），安装仍走宿主 `POST /api/skills/hub/install/start` |
 | 智能体 | 智能体市场四页签，安装走插件 → 宿主 `POST /api/agents`（见下节） |
+| 概览 | 只读 Dashboard：技能/智能体总数、累计下载、本月新增、内容构成占比；数据来自 `GET /offline-market/stats` |
 
 技能四页签：
 
@@ -187,6 +188,7 @@ class OfflineMarketProvider:          # MarketProvider + MarketInstallProvider
 | --- | --- | --- |
 | GET | `/config` | 市场地址、租户、扫描闸门状态、阻塞原因（页面顶部横幅用） |
 | GET | `/limits` | 透传后端限额，页面据此做预检 |
+| GET | `/stats` | 概览聚合：技能/智能体总数、本月新增、累计下载 |
 | GET | `/skills?q=&page=&limit=` | 浏览/搜索 |
 | GET | `/mine` | 我发布的（含已撤回） |
 | GET | `/skills/{slug}/status` | `active` / `withdrawn` / `taken_down` |
@@ -260,7 +262,7 @@ offline_market/
   host.py                    # 本 runtime 的宿主 API 客户端（token 透传、loopback 限制、multipart）
   agents.py                  # 智能体快照 / 安装状态机 / 回滚 / 本机账本
   routes.py                  # 自用 HTTP 路由（fastapi 延迟导入）
-tests/                       # 98 个测试：闸门、映射、错误透传、路由、解压、快照/安装/回滚
+tests/                       # 107 个测试：闸门、映射、错误透传、路由、解压、快照/安装/回滚
 ```
 
 ## 实测链路（本机，backend 8099 + qwenpaw 8123）

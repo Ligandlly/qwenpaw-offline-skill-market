@@ -77,6 +77,12 @@ def build_router(settings: PluginSettings):
                     "message": "；".join(settings.problems()) or "离线技能市场未配置",
                 },
             )
+        url_problem = settings.market_url_problem()
+        if url_problem:
+            raise HTTPException(
+                status_code=503,
+                detail={"code": "invalid_market_url", "message": url_problem},
+            )
         return BackendClient(url, tenant, timeout=settings.timeout)
 
     def call(fn, *args, **kwargs) -> Any:
@@ -170,6 +176,10 @@ def build_router(settings: PluginSettings):
     @router.get("/limits")
     def get_limits() -> Any:
         return call(client().limits)
+
+    @router.get("/stats")
+    def get_stats() -> Any:
+        return call(client().stats)
 
     @router.get("/skills")
     def list_skills(q: str = "", page: int = 1, limit: int = 20) -> Any:

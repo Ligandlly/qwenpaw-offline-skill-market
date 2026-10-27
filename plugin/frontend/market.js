@@ -6,13 +6,14 @@
  * Registers a sidebar entry + a page route through `window.QwenPaw`.
  * React / antd come from `window.QwenPaw.host`; there is no build step.
  *
- * The page has two top-level tabs: 技能 (host-native install flow) and 智能体
- * (snapshot publish, host-API install, local ledger). Everything goes through
- * our own plugin routes (`/api/offline-market/...`); the browser never talks
- * to the market backend or the host API directly.
+ * The page has three top-level tabs: 技能 (host-native install flow), 智能体
+ * (snapshot publish, host-API install, local ledger) and 概览 (a read-only
+ * dashboard). Everything goes through our own plugin routes
+ * (`/api/offline-market/...`); the browser never talks to the market backend
+ * or the host API directly.
  */
 const PLUGIN_ID = "offline-market";
-const PLUGIN_VERSION = "0.1.3"; // keep in sync with plugin.json
+const PLUGIN_VERSION = "0.1.4"; // keep in sync with plugin.json
 const PLUGIN_LABEL = "内网市场";
 const VISIBILITY_LABEL = { public: "公开", tenant: "仅本租户" };
 const STATE_LABEL = { active: "已上架", withdrawn: "已撤回", taken_down: "已下架" };
@@ -83,7 +84,7 @@ function printBanner() {
     "color:#7c5cff;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:11px;line-height:1.15",
   );
   console.log(
-    `%c🧩 ${PLUGIN_ID}%c v${PLUGIN_VERSION} · ${PLUGIN_LABEL} · QwenPaw frontend plugin`,
+    `%c${PLUGIN_ID}%c v${PLUGIN_VERSION} · ${PLUGIN_LABEL} · QwenPaw frontend plugin`,
     "background:#7c5cff;color:#fff;padding:1px 6px;border-radius:3px;font-weight:600",
     "color:#7c5cff;font-weight:600",
   );
@@ -2148,6 +2149,656 @@ whenHost((paw) => {
       : h("div", null, tabs.map((tab) => h("section", { key: tab.key }, tab.children)));
   }
 
+  // ---------------------------------------------------------------- icons ---
+  // Inline SVG keeps the dashboard independent of whichever icon package the
+  // host bundle happens to expose, and avoids emoji fonts rendering differently
+  // across Windows/Linux consoles.
+
+  function MarketGlyph({ size = 18, color = "currentColor" }) {
+    return h(
+      "svg",
+      {
+        width: size,
+        height: size,
+        viewBox: "0 0 24 24",
+        fill: "none",
+        stroke: color,
+        strokeWidth: 1.8,
+        strokeLinecap: "round",
+        strokeLinejoin: "round",
+        "aria-hidden": "true",
+      },
+      h("rect", { key: "a", x: 3, y: 3, width: 7, height: 7, rx: 2 }),
+      h("rect", { key: "b", x: 14, y: 3, width: 7, height: 7, rx: 2 }),
+      h("rect", { key: "c", x: 3, y: 14, width: 7, height: 7, rx: 2 }),
+      h("path", { key: "d", d: "M17.5 14v7M14 17.5h7" }),
+    );
+  }
+
+  function SidebarMarketEntry() {
+    return h(
+      "a",
+      {
+        href: "/offline-market",
+        title: "内网市场：技能与智能体",
+        "aria-label": "打开内网市场",
+        style: {
+          display: "flex",
+          alignItems: "center",
+          gap: 10,
+          width: "100%",
+          boxSizing: "border-box",
+          padding: "9px 11px",
+          margin: "4px 0 2px",
+          borderRadius: 11,
+          border: "1px solid rgba(255, 255, 255, 0.16)",
+          background: "linear-gradient(135deg, #6366f1 0%, #4f46e5 55%, #4338ca 100%)",
+          boxShadow: "0 6px 16px rgba(79, 70, 229, 0.24)",
+          color: "#ffffff",
+          textDecoration: "none",
+          fontSize: 13,
+          fontWeight: 650,
+          lineHeight: 1.2,
+          whiteSpace: "nowrap",
+          overflow: "hidden",
+        },
+      },
+      h(MarketGlyph, { size: 18 }),
+      h("span", { style: { flex: 1, textAlign: "left" } }, "内网市场"),
+      h("span", { style: { fontSize: 15, opacity: 0.72 } }, "›"),
+    );
+  }
+
+  function MetricIcon({ name, color = "currentColor", size = 24 }) {
+    const common = {
+      width: size,
+      height: size,
+      viewBox: "0 0 24 24",
+      fill: "none",
+      stroke: color,
+      strokeWidth: 1.8,
+      strokeLinecap: "round",
+      strokeLinejoin: "round",
+      "aria-hidden": "true",
+    };
+    if (name === "skills") {
+      return h(
+        "svg",
+        common,
+        h("rect", { key: "a", x: 3, y: 3, width: 7, height: 7, rx: 2 }),
+        h("rect", { key: "b", x: 14, y: 3, width: 7, height: 7, rx: 2 }),
+        h("rect", { key: "c", x: 3, y: 14, width: 7, height: 7, rx: 2 }),
+        h("path", { key: "d", d: "M17.5 14v7M14 17.5h7" }),
+      );
+    }
+    if (name === "agents") {
+      return h(
+        "svg",
+        common,
+        h("rect", { key: "a", x: 4, y: 7, width: 16, height: 12, rx: 4 }),
+        h("path", { key: "b", d: "M12 3v4" }),
+        h("circle", { key: "c", cx: 12, cy: 2.6, r: 1.2 }),
+        h("circle", { key: "d", cx: 9, cy: 12.5, r: 1.2, fill: color, stroke: "none" }),
+        h("circle", { key: "e", cx: 15, cy: 12.5, r: 1.2, fill: color, stroke: "none" }),
+        h("path", { key: "f", d: "M9 16h6" }),
+      );
+    }
+    if (name === "downloads") {
+      return h(
+        "svg",
+        common,
+        h("path", { key: "a", d: "M12 3v10.5" }),
+        h("path", { key: "b", d: "m7.5 9.5 4.5 4.5 4.5-4.5" }),
+        h("path", { key: "c", d: "M4 16.5v2A2.5 2.5 0 0 0 6.5 21h11a2.5 2.5 0 0 0 2.5-2.5v-2" }),
+      );
+    }
+    if (name === "new") {
+      return h(
+        "svg",
+        common,
+        h("path", {
+          key: "a",
+          d: "m12 3 1.6 4.9L18.5 9.5l-4.9 1.6L12 16l-1.6-4.9L5.5 9.5l4.9-1.6L12 3Z",
+        }),
+        h("path", {
+          key: "b",
+          d: "M18.5 14.5 19.3 17l2.2.8-2.2.8-.8 2.4-.8-2.4-2.2-.8 2.2-.8.8-2.5Z",
+        }),
+      );
+    }
+    return null;
+  }
+
+  // --------------------------------------------------------------- overview ---
+
+  const numberFormatter = new Intl.NumberFormat("zh-CN");
+
+  function formatNumber(value) {
+    const number = Number(value);
+    return numberFormatter.format(Number.isFinite(number) ? number : 0);
+  }
+
+  function formatTime(seconds) {
+    const date = seconds ? new Date(seconds * 1000) : new Date();
+    try {
+      return date.toLocaleString("zh-CN", {
+        month: "2-digit",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+        hour12: false,
+      });
+    } catch (err) {
+      return date.toISOString();
+    }
+  }
+
+  function OverviewTab() {
+    const [data, setData] = useState(null);
+    const [loading, setLoading] = useState(true);
+    const [error, setError] = useState(null);
+
+    const load = useCallback(async () => {
+      setLoading(true);
+      setError(null);
+      logger.debug("加载 /offline-market/stats");
+      try {
+        const body = await getJson("/offline-market/stats");
+        setData(body);
+        logger.debug("概览统计", body);
+      } catch (err) {
+        logger.error("概览统计加载失败", err);
+        setError(
+          err.status === 404
+            ? "当前市场后端版本不支持概览统计，请升级后端后重试。"
+            : err.message,
+        );
+      } finally {
+        setLoading(false);
+      }
+    }, []);
+
+    useEffect(() => {
+      load();
+    }, [load]);
+
+    const skills = (data && data.skills) || {};
+    const agents = (data && data.agents) || {};
+    const totals = (data && data.totals) || {};
+    const skillTotal = Number(skills.total) || 0;
+    const agentTotal = Number(agents.total) || 0;
+    const itemTotal = skillTotal + agentTotal;
+    const skillPct = itemTotal ? Math.round((skillTotal / itemTotal) * 100) : 0;
+    const monthSkill = Number(skills.new_this_month) || 0;
+    const monthAgent = Number(agents.new_this_month) || 0;
+    const monthTotal = Number(totals.new_this_month) || monthSkill + monthAgent;
+    const downloadTotal = Number(totals.downloads) || 0;
+
+    const palette = {
+      ink: "#0f172a",
+      muted: "#64748b",
+      faint: "#94a3b8",
+      line: "#e2e8f0",
+      skills: "#6366f1",
+      agents: "#14b8a6",
+      downloads: "#0ea5e9",
+      fresh: "#f59e0b",
+    };
+
+    const cardStyle = {
+      position: "relative",
+      overflow: "hidden",
+      padding: 22,
+      borderRadius: 18,
+      background: "#ffffff",
+      border: "1px solid rgba(148, 163, 184, 0.18)",
+      boxShadow: "0 10px 30px rgba(15, 23, 42, 0.06)",
+    };
+
+    const hero = h(
+      "div",
+      {
+        style: {
+          position: "relative",
+          overflow: "hidden",
+          padding: "28px 32px",
+          borderRadius: 24,
+          color: "#ffffff",
+          background:
+            "radial-gradient(circle at 84% 18%, rgba(255,255,255,0.22), transparent 28%), linear-gradient(120deg, #4338ca 0%, #6366f1 48%, #0ea5e9 100%)",
+          boxShadow: "0 18px 42px rgba(79, 70, 229, 0.28)",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          gap: 24,
+          flexWrap: "wrap",
+        },
+      },
+      h(
+        "div",
+        null,
+        h(
+          "div",
+          {
+            style: {
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 8,
+              fontSize: 11,
+              fontWeight: 700,
+              letterSpacing: 1.4,
+              textTransform: "uppercase",
+              opacity: 0.82,
+            },
+          },
+          h("span", {
+            style: {
+              width: 7,
+              height: 7,
+              borderRadius: "50%",
+              background: "#6ee7b7",
+              boxShadow: "0 0 0 4px rgba(110, 231, 183, 0.18)",
+            },
+          }),
+          "Live overview",
+        ),
+        h(
+          "h2",
+          {
+            style: {
+              margin: "10px 0 8px",
+              fontSize: 30,
+              lineHeight: 1.2,
+              fontWeight: 800,
+              letterSpacing: 0.2,
+            },
+          },
+          "内网市场概览",
+        ),
+        h(
+          "div",
+          { style: { maxWidth: 580, fontSize: 14, lineHeight: 1.75, opacity: 0.86 } },
+          "技能与智能体，一处掌握。统计公开内容与本租户私有内容，撤回或下架后不再计入总数。",
+        ),
+      ),
+      h(
+        "div",
+        { style: { display: "flex", alignItems: "center", gap: 16, flexWrap: "wrap" } },
+        h(
+          "div",
+          { style: { textAlign: "right" } },
+          h("div", { style: { fontSize: 11, opacity: 0.68, letterSpacing: 0.6 } }, "更新时间"),
+          h(
+            "div",
+            { style: { marginTop: 4, fontSize: 13, fontWeight: 600 } },
+            formatTime(data && data.generated_at),
+          ),
+        ),
+        h(
+          Button,
+          {
+            loading,
+            onClick: load,
+            style: {
+              color: "#ffffff",
+              background: "rgba(255, 255, 255, 0.16)",
+              borderColor: "rgba(255, 255, 255, 0.30)",
+              borderRadius: 10,
+              fontWeight: 600,
+            },
+          },
+          "刷新数据",
+        ),
+      ),
+    );
+
+    if (loading && !data) {
+      return h(
+        "div",
+        { style: { display: "flex", flexDirection: "column", gap: 16 } },
+        hero,
+        h(
+          "div",
+          {
+            style: {
+              minHeight: 260,
+              display: "grid",
+              placeItems: "center",
+              borderRadius: 18,
+              background: "#ffffff",
+              border: "1px solid rgba(148, 163, 184, 0.18)",
+            },
+          },
+          h(Spin, { tip: "正在汇总市场数据…" }),
+        ),
+      );
+    }
+
+    const metrics = [
+      {
+        key: "skills",
+        label: "技能总数",
+        value: skillTotal,
+        hint: "个可安装技能",
+        icon: "skills",
+        accent: palette.skills,
+        soft: "linear-gradient(135deg, #eef2ff, #e0e7ff)",
+      },
+      {
+        key: "agents",
+        label: "智能体总数",
+        value: agentTotal,
+        hint: "个可安装智能体",
+        icon: "agents",
+        accent: palette.agents,
+        soft: "linear-gradient(135deg, #ecfdf5, #ccfbf1)",
+      },
+      {
+        key: "downloads",
+        label: "累计下载",
+        value: downloadTotal,
+        hint: "次成功取包",
+        icon: "downloads",
+        accent: palette.downloads,
+        soft: "linear-gradient(135deg, #eff6ff, #dbeafe)",
+      },
+      {
+        key: "new",
+        label: "本月新增",
+        value: monthTotal,
+        hint: "个新内容",
+        icon: "new",
+        accent: palette.fresh,
+        soft: "linear-gradient(135deg, #fffbeb, #fef3c7)",
+      },
+    ];
+
+    const metricCards = metrics.map((metric) =>
+      h(
+        "div",
+        { key: metric.key, style: cardStyle },
+        h("div", {
+          style: {
+            position: "absolute",
+            left: 0,
+            top: 0,
+            bottom: 0,
+            width: 4,
+            background: metric.accent,
+          },
+        }),
+        h(
+          "div",
+          { style: { display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 12 } },
+          h(
+            "div",
+            null,
+            h(
+              "div",
+              { style: { fontSize: 13, fontWeight: 600, color: palette.muted, letterSpacing: 0.3 } },
+              metric.label,
+            ),
+            h(
+              "div",
+              {
+                style: {
+                  marginTop: 8,
+                  fontSize: 38,
+                  lineHeight: 1.05,
+                  fontWeight: 800,
+                  color: palette.ink,
+                  fontVariantNumeric: "tabular-nums",
+                  letterSpacing: -0.5,
+                },
+              },
+              formatNumber(metric.value),
+            ),
+            h("div", { style: { marginTop: 8, fontSize: 12, color: palette.faint } }, metric.hint),
+          ),
+          h(
+            "div",
+            {
+              style: {
+                width: 48,
+                height: 48,
+                flex: "0 0 auto",
+                borderRadius: 15,
+                display: "grid",
+                placeItems: "center",
+                fontSize: 23,
+                background: metric.soft,
+                border: `1px solid ${metric.accent}22`,
+              },
+            },
+            h(MetricIcon, { name: metric.icon, color: metric.accent }),
+          ),
+        ),
+      ),
+    );
+
+    const legendRow = (color, label, value, percent) =>
+      h(
+        "div",
+        { style: { display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 } },
+        h(
+          "div",
+          { style: { display: "flex", alignItems: "center", gap: 9 } },
+          h("span", { style: { width: 9, height: 9, borderRadius: 3, background: color } }),
+          h("span", { style: { fontSize: 13, color: "#334155", fontWeight: 600 } }, label),
+        ),
+        h(
+          "div",
+          { style: { display: "flex", alignItems: "baseline", gap: 7 } },
+          h("span", { style: { fontSize: 16, fontWeight: 700, color: palette.ink } }, formatNumber(value)),
+          h("span", { style: { fontSize: 11, color: palette.faint } }, `${percent}%`),
+        ),
+      );
+
+    const progressRow = (label, value, total, color) => {
+      const percent = total > 0 ? Math.min(100, Math.round((value / total) * 100)) : 0;
+      return h(
+        "div",
+        { style: { marginTop: 16 } },
+        h(
+          "div",
+          { style: { display: "flex", alignItems: "baseline", justifyContent: "space-between", marginBottom: 7 } },
+          h("span", { style: { fontSize: 13, fontWeight: 600, color: "#334155" } }, label),
+          h(
+            "span",
+            { style: { fontSize: 12, color: palette.faint } },
+            `${formatNumber(value)} / ${formatNumber(total)}`,
+          ),
+        ),
+        h(
+          "div",
+          { style: { height: 8, borderRadius: 999, background: "#f1f5f9", overflow: "hidden" } },
+          h("div", {
+            style: {
+              height: "100%",
+              width: `${percent}%`,
+              borderRadius: 999,
+              background: `linear-gradient(90deg, ${color}, ${color}99)`,
+              transition: "width 0.4s ease",
+            },
+          }),
+        ),
+      );
+    };
+
+    const composition = h(
+      "div",
+      { style: { ...cardStyle, display: "flex", flexDirection: "column", gap: 18 } },
+      h(
+        "div",
+        null,
+        h("div", { style: { fontSize: 16, fontWeight: 700, color: palette.ink } }, "内容构成"),
+        h("div", { style: { marginTop: 4, fontSize: 12, color: palette.faint } }, "当前可浏览的技能与智能体占比"),
+      ),
+      h(
+        "div",
+        { style: { display: "flex", alignItems: "center", gap: 24, flexWrap: "wrap" } },
+        h(
+          "div",
+          {
+            style: {
+              width: 148,
+              height: 148,
+              flex: "0 0 auto",
+              borderRadius: "50%",
+              background: itemTotal
+                ? `conic-gradient(${palette.skills} 0 ${skillPct}%, ${palette.agents} ${skillPct}% 100%)`
+                : "#e2e8f0",
+              display: "grid",
+              placeItems: "center",
+              boxShadow: "inset 0 0 0 1px rgba(15, 23, 42, 0.04)",
+            },
+          },
+          h(
+            "div",
+            {
+              style: {
+                width: 108,
+                height: 108,
+                borderRadius: "50%",
+                background: "#ffffff",
+                display: "flex",
+                flexDirection: "column",
+                alignItems: "center",
+                justifyContent: "center",
+                boxShadow: "0 2px 10px rgba(15, 23, 42, 0.06)",
+              },
+            },
+            h(
+              "div",
+              { style: { fontSize: 27, lineHeight: 1.1, fontWeight: 800, color: palette.ink } },
+              formatNumber(itemTotal),
+            ),
+            h("div", { style: { marginTop: 2, fontSize: 11, color: palette.faint } }, "内容总数"),
+          ),
+        ),
+        h(
+          "div",
+          { style: { flex: "1 1 160px", display: "flex", flexDirection: "column", gap: 14 } },
+          legendRow(palette.skills, "技能", skillTotal, itemTotal ? skillPct : 0),
+          legendRow(palette.agents, "智能体", agentTotal, itemTotal ? 100 - skillPct : 0),
+        ),
+      ),
+      h(
+        "div",
+        {
+          style: {
+            display: "grid",
+            gridTemplateColumns: "1fr 1fr",
+            gap: 12,
+            paddingTop: 16,
+            borderTop: `1px dashed ${palette.line}`,
+          },
+        },
+        h(
+          "div",
+          null,
+          h("div", { style: { fontSize: 11, color: palette.faint } }, "技能下载"),
+          h("div", { style: { marginTop: 4, fontSize: 18, fontWeight: 700, color: palette.ink } }, formatNumber(skills.downloads)),
+        ),
+        h(
+          "div",
+          null,
+          h("div", { style: { fontSize: 11, color: palette.faint } }, "智能体下载"),
+          h("div", { style: { marginTop: 4, fontSize: 18, fontWeight: 700, color: palette.ink } }, formatNumber(agents.downloads)),
+        ),
+      ),
+    );
+
+    const monthly = h(
+      "div",
+      { style: { ...cardStyle, display: "flex", flexDirection: "column" } },
+      h(
+        "div",
+        { style: { display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12 } },
+        h(
+          "div",
+          null,
+          h("div", { style: { fontSize: 16, fontWeight: 700, color: palette.ink } }, "本月新增"),
+          h("div", { style: { marginTop: 4, fontSize: 12, color: palette.faint } }, "按内容创建时间统计"),
+        ),
+        h(
+          "span",
+          {
+            style: {
+              padding: "3px 10px",
+              borderRadius: 999,
+              fontSize: 12,
+              fontWeight: 700,
+              color: "#b45309",
+              background: "#fffbeb",
+              border: "1px solid #fde68a",
+            },
+          },
+          `+${formatNumber(monthTotal)}`,
+        ),
+      ),
+      h(
+        "div",
+        { style: { marginTop: 18, display: "flex", alignItems: "baseline", gap: 8 } },
+        h("span", { style: { fontSize: 42, lineHeight: 1, fontWeight: 800, color: palette.ink } }, formatNumber(monthTotal)),
+        h("span", { style: { fontSize: 13, color: palette.muted } }, "件新内容"),
+      ),
+      progressRow("技能", monthSkill, skillTotal, palette.skills),
+      progressRow("智能体", monthAgent, agentTotal, palette.agents),
+      h(
+        "div",
+        {
+          style: {
+            marginTop: "auto",
+            paddingTop: 18,
+            fontSize: 12,
+            lineHeight: 1.7,
+            color: palette.faint,
+          },
+        },
+        "下载量按成功获取安装包的次数统计；撤回或下架不会抹除历史下载。",
+      ),
+    );
+
+    return h(
+      "div",
+      { style: { display: "flex", flexDirection: "column", gap: 16 } },
+      hero,
+      error
+        ? h(Alert, {
+            type: "error",
+            showIcon: true,
+            message: "概览数据加载失败",
+            description: error,
+          })
+        : null,
+      h(
+        "div",
+        {
+          style: {
+            display: "grid",
+            gridTemplateColumns: "repeat(auto-fit, minmax(210px, 1fr))",
+            gap: 16,
+          },
+        },
+        metricCards,
+      ),
+      h(
+        "div",
+        {
+          style: {
+            display: "grid",
+            gridTemplateColumns: "repeat(auto-fit, minmax(300px, 1fr))",
+            gap: 16,
+            alignItems: "stretch",
+          },
+        },
+        composition,
+        monthly,
+      ),
+    );
+  }
+
   function MarketPage() {
     const { config, limits, error, setError } = useMarketData();
     const [notice, setNotice] = useState(null);
@@ -2170,6 +2821,11 @@ whenHost((paw) => {
         key: "agents",
         label: "智能体",
         children: h(AgentMarketPage, { config, onNotice }),
+      },
+      {
+        key: "overview",
+        label: "概览",
+        children: h(OverviewTab),
       },
     ];
 
@@ -2212,17 +2868,27 @@ whenHost((paw) => {
     },
   });
 
-  // Sidebar: right after the built-in marketplace, so both are equally visible.
-  logger.debug("注册侧边栏菜单", { location: "primary.agentScoped", after: "core.marketplace" });
-  paw.menu.add(PLUGIN_ID, {
-    id: "offline-market.menu",
-    location: "primary.agentScoped",
-    after: "core.marketplace",
-    order: 16,
-    label: "内网市场",
-    icon: "🧩",
-    route: "offline-market.page",
-  });
+  // Sidebar: `sider.top` renders outside the collapsible nav, directly below
+  // the New Task button. A menu item would always live inside that nav group.
+  if (paw.slot && typeof paw.slot.fill === "function") {
+    logger.debug("注册侧边栏顶部入口", { slot: "sider.top" });
+    paw.slot.fill(PLUGIN_ID, "sider.top", () => h(SidebarMarketEntry), {
+      id: "offline-market.sider",
+      order: 10,
+    });
+  } else {
+    // Older hosts without the slot API still get a discoverable nav entry.
+    logger.debug("注册侧边栏菜单（slot 不可用的兜底）", { before: "core.inbox" });
+    paw.menu.add(PLUGIN_ID, {
+      id: "offline-market.menu",
+      location: "primary.agentScoped",
+      before: "core.inbox",
+      order: 5,
+      label: "内网市场",
+      icon: h(MarketGlyph, { size: 18 }),
+      route: "offline-market.page",
+    });
+  }
 
   logger.info(
     `frontend registered（路由 /offline-market，菜单 ${PLUGIN_LABEL}，debug=${debugOn ? "开" : "关"}）`,

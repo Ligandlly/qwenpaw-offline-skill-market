@@ -33,7 +33,10 @@ CREATE TABLE IF NOT EXISTS skills (
     withdrawn_by     TEXT,
     takedown_at      INTEGER,
     takedown_by      TEXT,
-    takedown_reason  TEXT
+    takedown_reason  TEXT,
+    -- Successful bundle fetches (installs). A counter, not an audit row:
+    -- a dashboard needs cheap SUM(), and old rows start at zero.
+    download_count   INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_skills_owner ON skills(owner_tenant);
 
@@ -60,7 +63,8 @@ CREATE TABLE IF NOT EXISTS agents (
     withdrawn_by     TEXT,
     takedown_at      INTEGER,
     takedown_by      TEXT,
-    takedown_reason  TEXT
+    takedown_reason  TEXT,
+    download_count   INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_agents_owner ON agents(owner_tenant);
 
@@ -111,25 +115,39 @@ pub fn open_memory() -> rusqlite::Result<Connection> {
 /// `CREATE TABLE IF NOT EXISTS` cannot add columns to a market that is
 /// already running, so older databases get the new ones here. Idempotent.
 fn migrate(conn: &Connection) -> rusqlite::Result<()> {
-    let columns: Vec<String> = conn
-        .prepare("PRAGMA table_info(tenants)")?
-        .query_map([], |row| row.get::<_, String>(1))?
-        .collect::<rusqlite::Result<_>>()?;
-    if !columns.iter().any(|name| name == "display_name") {
-        conn.execute("ALTER TABLE tenants ADD COLUMN display_name TEXT", [])?;
-        tracing::info!("schema: tenants.display_name added");
-    }
+    ensure_column(conn, "tenants", "display_name", "TEXT")?;
+    ensure_column(conn, "audit_log", "kind", "TEXT NOT NULL DEFAULT 'skill'")?;
+    ensure_column(
+        conn,
+        "skills",
+        "download_count",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
+    ensure_column(
+        conn,
+        "agents",
+        "download_count",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
+    Ok(())
+}
 
-    let audit_columns: Vec<String> = conn
-        .prepare("PRAGMA table_info(audit_log)")?
+fn ensure_column(
+    conn: &Connection,
+    table: &str,
+    column: &str,
+    definition: &str,
+) -> rusqlite::Result<()> {
+    let columns: Vec<String> = conn
+        .prepare(&format!("PRAGMA table_info({table})"))?
         .query_map([], |row| row.get::<_, String>(1))?
         .collect::<rusqlite::Result<_>>()?;
-    if !audit_columns.iter().any(|name| name == "kind") {
+    if !columns.iter().any(|name| name == column) {
         conn.execute(
-            "ALTER TABLE audit_log ADD COLUMN kind TEXT NOT NULL DEFAULT 'skill'",
+            &format!("ALTER TABLE {table} ADD COLUMN {column} {definition}"),
             [],
         )?;
-        tracing::info!("schema: audit_log.kind added");
+        tracing::info!(table, column, "schema: column added");
     }
     Ok(())
 }

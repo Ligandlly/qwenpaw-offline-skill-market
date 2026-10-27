@@ -716,3 +716,50 @@ async fn lookup_maps_display_name_to_slug_even_after_takedown() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["items"].as_array().unwrap().len(), 0);
 }
+
+#[tokio::test]
+async fn dashboard_counts_visible_active_items_and_keeps_download_history() {
+    let h = Harness::new();
+    h.publish("tenant-a", "demo", "1.0.0", "public").await;
+    h.publish("tenant-a", "internal", "1.0.0", "tenant").await;
+    h.publish("tenant-b", "other", "1.0.0", "public").await;
+
+    // Two successful skill downloads.
+    for _ in 0..2 {
+        let (status, _, _) = h
+            .call("GET", "/skills/demo/latest", Some("tenant-b"), None, None)
+            .await;
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    let (status, stats, _) = h
+        .call("GET", "/api/v1/stats", Some("tenant-b"), None, None)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{stats}");
+    // tenant-b sees the two public skills, not tenant-a's private one.
+    assert_eq!(stats["skills"]["total"], 2);
+    assert_eq!(stats["skills"]["new_this_month"], 2);
+    assert_eq!(stats["skills"]["downloads"], 2);
+    assert_eq!(stats["agents"]["total"], 0);
+    assert_eq!(stats["totals"]["downloads"], 2);
+    assert_eq!(stats["totals"]["new_this_month"], 2);
+
+    // Takedown hides the item but keeps the cumulative download count.
+    let cookie = h.login().await;
+    let (status, _, _) = h
+        .call(
+            "POST",
+            "/admin/api/skills/demo/takedown",
+            None,
+            Some(json!({ "reason": "test" })),
+            Some(&cookie),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (_, stats, _) = h
+        .call("GET", "/api/v1/stats", Some("tenant-b"), None, None)
+        .await;
+    assert_eq!(stats["skills"]["total"], 1);
+    assert_eq!(stats["skills"]["downloads"], 2);
+}

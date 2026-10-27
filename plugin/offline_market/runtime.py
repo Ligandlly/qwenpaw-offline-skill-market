@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import urllib.parse
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -143,6 +144,27 @@ class PluginSettings:
         ) or DEFAULT_MARKET_URL
         return raw.rstrip("/")
 
+    def market_url_problem(self) -> str | None:
+        """Reject addresses urllib cannot use, with the typo in the message.
+
+        A literal space (``http://10 .10.145.48:8080``) used to escape as an
+        unhandled ``http.client.InvalidURL`` and surface as HTTP 500.
+        """
+        url = self.market_url
+        if any(char.isspace() for char in url):
+            return (
+                f"市场地址包含空白字符：{url!r}；"
+                "请改成连续地址（例如 http://10.10.145.48:8080）"
+            )
+        try:
+            parsed = urllib.parse.urlsplit(url)
+            _ = parsed.port  # validates a malformed/non-numeric port
+        except ValueError as exc:
+            return f"市场地址无效：{url!r}（{exc}）"
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            return f"市场地址必须是 http(s)://主机[:端口]：{url!r}"
+        return None
+
     @property
     def tenant(self) -> str | None:
         """The only identity source the host gives us in the market path."""
@@ -203,6 +225,9 @@ class PluginSettings:
     def problems(self) -> list[str]:
         """Reasons this market cannot serve, most fundamental first."""
         out: list[str] = []
+        url_problem = self.market_url_problem()
+        if url_problem:
+            out.append(url_problem)
         gate = self.scan_gate()
         if not gate.ok:
             out.append(gate.reason())

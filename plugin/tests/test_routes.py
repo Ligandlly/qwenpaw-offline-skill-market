@@ -65,6 +65,23 @@ def test_list_and_mine_pass_the_tenant_header(api, env, backend):
     assert api.get("/offline-market/mine").json()["items"][0]["slug"] == "x"
 
 
+def test_dashboard_stats_are_proxied_with_the_tenant_header(api, env, backend):
+    backend.on(
+        "GET",
+        "/api/v1/stats",
+        200,
+        {
+            "skills": {"total": 3, "new_this_month": 1, "downloads": 9},
+            "agents": {"total": 2, "new_this_month": 0, "downloads": 4},
+            "totals": {"skills": 3, "agents": 2, "downloads": 13, "new_this_month": 1},
+        },
+    )
+    body = api.get("/offline-market/stats").json()
+    assert body["totals"]["downloads"] == 13
+    assert backend.requests[-1]["path"] == "/api/v1/stats"
+    assert backend.requests[-1]["headers"]["x-tenant-id"] == "tenant-a"
+
+
 def test_publish_forwards_visibility_and_rejects_bad_files(api, env, backend):
     backend.on("POST", "/api/v1/skills", 201, {"slug": "demo", "version": "1.0.0"})
     ok = api.post(

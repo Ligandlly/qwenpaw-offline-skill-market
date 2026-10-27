@@ -47,3 +47,11 @@ def test_http_error_keeps_its_body(monkeypatch):
     status, raw = urllib_transport("GET", URL, {}, None, 1.0)
     assert status == 503
     assert raw == b""
+
+
+def test_invalid_url_is_a_backend_error_not_a_crash():
+    with pytest.raises(BackendError) as excinfo:
+        urllib_transport("GET", "http://10 .10.145.48:8080/health", {}, None, 1.0)
+    assert excinfo.value.status == 0
+    assert excinfo.value.code == "invalid_market_url"
+    assert "10 .10.145.48" in str(excinfo.value)

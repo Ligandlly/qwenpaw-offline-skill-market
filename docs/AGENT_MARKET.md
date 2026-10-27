@@ -28,8 +28,8 @@
   宿主 API 客户端（loopback 约束、内部 token/Authorization 转发、multipart 技能上传）、
   从现有 agent 的只读快照、安装状态机（创建→等就绪→写 MD→装技能→应用配置）、
   失败回滚、按 slug 并发锁、本机安装账本、卸载与对账。
-  插件测试 98 项全绿（新增 34：host 11 + agents 11 + routes 12），不联网、不需要宿主。
-- **M3 前端已落地**（`plugin/frontend/market.js`）：顶层「技能 / 智能体」两个页签；
+  插件测试 107 项全绿（新增 34：host 11 + agents 11 + routes 12），不联网、不需要宿主。
+- **M3 前端已落地**（`plugin/frontend/market.js`）：顶层「技能 / 智能体 / 概览」三个页签；
   智能体四页签（市场/发布/我的发布/已安装）、安装弹窗（阶段提示、失败 step、回滚/保留工作区）、
   发布预览（新增 `/api/offline-market/agents/preview`）、卸载确认。无构建步骤；
   `node --check` 通过，`spikes/m3_verify.py` 已增加智能体页签渲染检查（真机执行需部署环境）。
@@ -417,6 +417,7 @@ loopback 默认端口；成功后就记住该地址。显式配置的地址不�
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
+| GET | `/api/offline-market/stats` | 概览聚合（代理后端 `/api/v1/stats`） |
 | GET | `/api/offline-market/agents?q=&page=&limit=` | 市场列表（代理后端） |
 | GET | `/api/offline-market/agents/mine` | 我的发布 |
 | GET | `/api/offline-market/agents/{slug}/status` | 市场状态 |
@@ -432,16 +433,18 @@ loopback 默认端口；成功后就记住该地址。显式配置的地址不�
 
 ## 6. 前端（`plugin/frontend/market.js`）
 
-侧边栏名称从「技能市场（内网）」改为「**内网市场**」，页面顶部两个一级页签：
+侧边栏名称从「技能市场（内网）」改为「**内网市场**」。入口通过 `sider.top` 插槽放在
+New Task 按钮正下方、折叠菜单之外；页面顶部三个一级页签：
 
 ```
 内网市场
 ├── 技能      ← 现有四个页签原样保留
-└── 智能体
-    ├── 市场   表格：名称/描述/发布者/技能数/版本数/可见性 + 「安装」
-    ├── 发布   选择本机 agent → 预览（人设文件、技能、文件数/大小）→ 发布
-    ├── 我的发布 撤回 / 恢复；被下架显示「无法自助恢复」
-    └── 已安装 账本条目 + 市场状态 + 「卸载」
+├── 智能体
+│   ├── 市场   表格：名称/描述/发布者/技能数/版本数/可见性 + 「安装」
+│   ├── 发布   选择本机 agent → 预览（人设文件、技能、文件数/大小）→ 发布
+│   ├── 我的发布 撤回 / 恢复；被下架显示「无法自助恢复」
+│   └── 已安装 账本条目 + 市场状态 + 「卸载」
+└── 概览      只读 Dashboard：总数/下载量/本月新增/构成占比
 ```
 
 安装弹窗：
@@ -483,7 +486,7 @@ loopback 默认端口；成功后就记住该地址。显式配置的地址不�
   `check_agent_bundle`（manifest/路径/技能 frontmatter）、发布/列表/我的/状态/下载/
   撤回/恢复、管理端列表/下架/恢复、审计 `kind` 过滤、64 MiB 传输上限
 - 未交付（按本轮决定后置）：独立额度、发布侧配置白名单强制校验、恶意内容策略
-- 测试：`cargo test` 24 单测 + 23 集成全绿（智能体新增 7 单测 + 8 集成）；
+- 测试：`cargo test` 24 单测 + 27 集成全绿（智能体新增 7 单测 + 8 集成）；
   `cargo clippy --all-targets -- -D warnings` 通过
 
 ### M2 插件 — ✅ 已完成（2026-10-27）
@@ -494,13 +497,13 @@ loopback 默认端口；成功后就记住该地址。显式配置的地址不�
   - `agents.py`：只读快照（五种 MD + 启用技能，跳过 symlink/`__pycache__`）、
     安装状态机、rollback、按 slug 并发锁、原子账本、卸载、对账
   - `routes.py`：市场代理、`/host-agents`、发布、安装、卸载、已安装
-- 测试：`pytest` 98 项全绿（新增 34：host 11 + agents 11 + routes 12）；
+- 测试：`pytest` 107 项全绿（新增 34：host 11 + agents 11 + routes 12）；
   `compileall` 通过；不联网、不需要 QwenPaw
 - 明确未做：前端页签（M3）；安装进度是同步请求，页面只能显示最终 `step`/回滚结果
 
 ### M3 前端 — ✅ 已完成（代码，2026-10-27）
 
-- 顶层「技能 / 智能体」页签；技能四页签原样保留
+- 顶层「技能 / 智能体 / 概览」页签；技能四页签原样保留
 - 智能体：市场（安装弹窗+阶段/回滚）、发布（本机 agent 选择 + 快照预览 + 发布）、
   我的发布（撤回/恢复）、已安装（账本/市场状态/卸载确认）
 - 新增插件路由 `POST /api/offline-market/agents/preview`（只快照，不发布）
@@ -515,7 +518,7 @@ loopback 默认端口；成功后就记住该地址。显式配置的地址不�
 - preflight：`--runtime-container` 增加容器内市场可达性 + 插件 `/host-health`
 - `docs/OPS.md` §2.6：Docker Hub 容器名、宿主 API 自调用、**ICC=false 导致不能用同网络
   容器名**（改用 bridge gateway）、工作区清理、验收命令
-- 验证：脚本 `py_compile` + 探针源码 `compile()`；插件 98 测试；无 Docker 权限，
+- 验证：脚本 `py_compile` + 探针源码 `compile()`；插件 107 测试；无 Docker 权限，
   phase C 未在当前环境真机执行
 
 ## 9. 未决（后续）

@@ -8,6 +8,7 @@ network.
 
 from __future__ import annotations
 
+import http.client
 import json
 import urllib.error
 import urllib.parse
@@ -37,8 +38,8 @@ def urllib_transport(
     body: bytes | None,
     timeout: float,
 ) -> tuple[int, bytes]:
-    request = urllib.request.Request(url, data=body, headers=headers, method=method)
     try:
+        request = urllib.request.Request(url, data=body, headers=headers, method=method)
         with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310
             return response.status, response.read()
     except urllib.error.HTTPError as exc:  # 4xx/5xx still carry a JSON body
@@ -47,6 +48,12 @@ def urllib_transport(
         raise BackendError(0, "unreachable", f"市场后端不可达（{url}）：{exc.reason}") from exc
     except TimeoutError as exc:  # read timeout: urllib does not wrap it
         raise BackendError(0, "timeout", f"市场后端超时（{url}）：{exc}") from exc
+    except (http.client.InvalidURL, ValueError) as exc:
+        # Not a network failure: the configured address itself is unusable,
+        # e.g. a space in the host. Map it instead of leaking a 500.
+        raise BackendError(
+            0, "invalid_market_url", f"市场地址无效（{url}）：{exc}"
+        ) from exc
     except OSError as exc:
         raise BackendError(0, "unreachable", f"市场后端不可达（{url}）：{exc}") from exc
 
@@ -114,6 +121,10 @@ class BackendClient:
 
     def limits(self) -> Any:
         return self._request("GET", "/api/v1/limits")
+
+    def stats(self) -> Any:
+        """Dashboard aggregates: totals, this month's new items, downloads."""
+        return self._request("GET", "/api/v1/stats")
 
     def list_skills(self, query: str = "", page: int = 1, limit: int = 20) -> Any:
         return self._request(
