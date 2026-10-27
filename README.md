@@ -19,7 +19,7 @@
 
 | 目录 | 内容 |
 | --- | --- |
-| `backend/` | 市场后端：Rust + axum + rusqlite（SQLite bundled），31 个测试 |
+| `backend/` | 市场后端：Rust + axum + rusqlite（SQLite bundled），32 个测试 |
 | `plugin/` | QwenPaw 2.2.2 插件：市场 provider + 自用 HTTP 路由 + 侧边栏页面，64 个测试 |
 | `deploy/` | docker-compose / systemd / 离线打包 / preflight / 端到端验收脚本 |
 | `docs/` | `OPS.md` 部署运维手册、`ACCEPTANCE.md` 验收标准 |
@@ -117,7 +117,7 @@ python3 deploy/scripts/preflight.py --market-url ... --runtimes-dir ... --app-ur
 发一个版本：
 
 ```bash
-git tag v0.1.2 && git push origin v0.1.2
+git tag v0.1.3 && git push origin v0.1.3
 # → Release 里会多出 offline-market-backend-<ver>-linux-x86_64.tar.gz(.sha256)
 #   以及 offline-market-image-<ver>-linux-amd64.tar(.sha256)
 #   以及 offline-market-plugin-<ver>-linux-x86_64.zip(.sha256)
@@ -127,7 +127,7 @@ git tag v0.1.2 && git push origin v0.1.2
 
 ```bash
 docker pull ghcr.io/ligandlly/qwenpaw-offline-skill-market:latest   # main 分支
-docker pull ghcr.io/ligandlly/qwenpaw-offline-skill-market:v0.1.2  # tag
+docker pull ghcr.io/ligandlly/qwenpaw-offline-skill-market:v0.1.3  # tag
 # 内网机器：在有网的机器上 docker save，拷过去 docker load
 ```
 

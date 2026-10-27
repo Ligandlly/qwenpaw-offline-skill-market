@@ -149,9 +149,9 @@ WARN request rejected tenant=- method=GET path=/api/v1/skills status=401 ms=0.1
 docker build -t offline-market:0.1 .
 
 # 推送与导出（CI 里由 .github/workflows/backend-image.yml 做）
-docker tag offline-market:0.1.2 ghcr.io/ligandlly/qwenpaw-offline-skill-market:v0.1.2
-docker push ghcr.io/ligandlly/qwenpaw-offline-skill-market:v0.1.2
-docker save -o offline-market-image.tar ghcr.io/ligandlly/qwenpaw-offline-skill-market:v0.1.2
+docker tag offline-market:0.1.3 ghcr.io/ligandlly/qwenpaw-offline-skill-market:v0.1.3
+docker push ghcr.io/ligandlly/qwenpaw-offline-skill-market:v0.1.3
+docker save -o offline-market-image.tar ghcr.io/ligandlly/qwenpaw-offline-skill-market:v0.1.3
 
 # 离线机器：拷 tarball 过去
 docker load -i offline-market-image.tar

@@ -1,6 +1,6 @@
 [package]
 name = "offline-market-backend"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2021"
 description = "Offline skill market backend for QwenPaw 2.2.2 hub tenants"
 license = "MIT"
