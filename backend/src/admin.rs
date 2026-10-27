@@ -311,6 +311,9 @@ pub async fn restore(
 pub struct AuditQuery {
     #[serde(default = "two_hundred")]
     pub limit: i64,
+    /// Optional `skill` / `agent` filter. Omitted (or unknown) means all.
+    #[serde(default)]
+    pub kind: Option<String>,
 }
 
 fn two_hundred() -> i64 {
@@ -324,22 +327,31 @@ pub async fn audit_log(
     Query(query): Query<AuditQuery>,
 ) -> Result<Json<Value>, ApiError> {
     let db = app.db();
+    let kind = query
+        .kind
+        .as_deref()
+        .map(str::trim)
+        .filter(|kind| matches!(*kind, "skill" | "agent"))
+        .map(str::to_string);
     let mut stmt = db
         .prepare(
-            "SELECT id, at, actor, action, slug, version, detail
-             FROM audit_log ORDER BY id DESC LIMIT ?1",
+            "SELECT id, at, kind, actor, action, slug, version, detail
+             FROM audit_log
+             WHERE (?2 IS NULL OR kind = ?2)
+             ORDER BY id DESC LIMIT ?1",
         )
         .map_err(internal)?;
     let items = stmt
-        .query_map(params![query.limit.clamp(1, 1000)], |row| {
+        .query_map(params![query.limit.clamp(1, 1000), kind], |row| {
             Ok(json!({
                 "id": row.get::<_, i64>(0)?,
                 "at": row.get::<_, i64>(1)?,
-                "actor": row.get::<_, String>(2)?,
-                "action": row.get::<_, String>(3)?,
-                "slug": row.get::<_, Option<String>>(4)?,
-                "version": row.get::<_, Option<String>>(5)?,
-                "detail": row.get::<_, Option<String>>(6)?,
+                "kind": row.get::<_, String>(2)?,
+                "actor": row.get::<_, String>(3)?,
+                "action": row.get::<_, String>(4)?,
+                "slug": row.get::<_, Option<String>>(5)?,
+                "version": row.get::<_, Option<String>>(6)?,
+                "detail": row.get::<_, Option<String>>(7)?,
             }))
         })
         .map_err(internal)?

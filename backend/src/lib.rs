@@ -8,6 +8,7 @@
 //! validation, scanning and installation (see PLAN.md §1).
 
 pub mod admin;
+pub mod agents;
 pub mod api;
 pub mod auth;
 pub mod config;
@@ -16,6 +17,7 @@ pub mod limits;
 pub mod log;
 pub mod state;
 
+use axum::extract::DefaultBodyLimit;
 use axum::routing::{get, post};
 use axum::Router;
 use std::sync::{Arc, Mutex};
@@ -48,13 +50,38 @@ pub fn router(app: Shared) -> Router {
         )
         // Short alias: this is the `bundle_url` handed to MarketSpec.fetch_bundle.
         .route("/skills/{slug}/{version}", get(api::fetch_bundle))
+        // ---- agent market (tenant plane) ----
+        .route(
+            "/api/v1/agents",
+            get(agents::list_agents).post(agents::publish),
+        )
+        .route("/api/v1/agents/mine", get(agents::list_mine))
+        .route("/api/v1/agents/{slug}/status", get(agents::agent_status))
+        .route("/api/v1/agents/{slug}/withdraw", post(agents::withdraw))
+        .route("/api/v1/agents/{slug}/restore", post(agents::restore))
+        .route(
+            "/api/v1/agents/{slug}/{version}/bundle",
+            get(agents::fetch_bundle),
+        )
         // ---- admin plane ----
         .route("/admin/api/login", post(admin::login))
         .route("/admin/api/logout", post(admin::logout))
         .route("/admin/api/skills", get(admin::list_skills))
         .route("/admin/api/skills/{slug}/takedown", post(admin::takedown))
         .route("/admin/api/skills/{slug}/restore", post(admin::restore))
+        .route("/admin/api/agents", get(agents::admin_list))
+        .route(
+            "/admin/api/agents/{slug}/takedown",
+            post(agents::admin_takedown),
+        )
+        .route(
+            "/admin/api/agents/{slug}/restore",
+            post(agents::admin_restore),
+        )
         .route("/admin/api/audit", get(admin::audit_log))
+        // Agent bundles can carry skills, so the default 2 MiB axum body
+        // limit is too small. This is a transport guard, not a market quota.
+        .layer(DefaultBodyLimit::max(64 * 1024 * 1024))
         .layer(axum::middleware::from_fn(log::request_log))
         .with_state(app)
 }

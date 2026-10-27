@@ -1,21 +1,36 @@
 /**
- * 技能市场（内网） — frontend entry for QwenPaw 2.2.2.
+ * 内网市场 — frontend entry for QwenPaw 2.2.2.
  *
  * Loaded by the console as an ES module:
  *   GET /api/frontend_plugin/offline-market/files/frontend/market.js
  * Registers a sidebar entry + a page route through `window.QwenPaw`.
  * React / antd come from `window.QwenPaw.host`; there is no build step.
  *
- * The page only talks to our own plugin routes (`/api/offline-market/...`).
- * Installation is the host's job: `POST /api/skills/hub/install/start` with
- * `provider_key: "offline-market"`, then poll `/status/{task_id}`.
+ * The page has two top-level tabs: 技能 (host-native install flow) and 智能体
+ * (snapshot publish, host-API install, local ledger). Everything goes through
+ * our own plugin routes (`/api/offline-market/...`); the browser never talks
+ * to the market backend or the host API directly.
  */
 const PLUGIN_ID = "offline-market";
 const PLUGIN_VERSION = "0.1.3"; // keep in sync with plugin.json
-const PLUGIN_LABEL = "技能市场（内网）";
+const PLUGIN_LABEL = "内网市场";
 const VISIBILITY_LABEL = { public: "公开", tenant: "仅本租户" };
 const STATE_LABEL = { active: "已上架", withdrawn: "已撤回", taken_down: "已下架" };
 const STATE_COLOR = { active: "green", withdrawn: "default", taken_down: "red" };
+const AGENT_STATE_LABEL = {
+  active: "正常",
+  withdrawn: "已撤回",
+  taken_down: "已下架",
+  gone: "市场中已不存在",
+  unknown: "未知",
+};
+const AGENT_STATE_COLOR = {
+  active: "green",
+  withdrawn: "default",
+  taken_down: "red",
+  gone: "default",
+  unknown: "default",
+};
 
 // ------------------------------------------------------------------ debug ---
 // Silent by default. Turn it on without rebuilding anything, either way:
@@ -190,29 +205,30 @@ function selectedAgentId() {
 const REQUEST_TIMEOUT_MS = 15000;
 
 async function request(path, init) {
-  const method = (init && init.method) || "GET";
+  const { timeoutMs = REQUEST_TIMEOUT_MS, ...fetchInit } = init || {};
+  const method = fetchInit.method || "GET";
   const url = apiUrl(path);
   const host = window.QwenPaw && window.QwenPaw.host;
   const token = host && typeof host.getApiToken === "function" ? host.getApiToken() : "";
-  const headers = { accept: "application/json", ...((init && init.headers) || {}) };
+  const headers = { accept: "application/json", ...((fetchInit && fetchInit.headers) || {}) };
   if (token) headers.Authorization = `Bearer ${token}`;
   const agent = selectedAgentId();
   if (agent) headers["X-Agent-Id"] = agent;
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
   const started = Date.now();
   logger.debug(`→ ${method} ${path}`, {
     url,
     agent: agent || "(未选中，宿主用 active_agent)",
     token: token ? "已附带" : "无",
-    timeout: REQUEST_TIMEOUT_MS,
+    timeout: timeoutMs,
   });
   let response;
   let text;
   try {
     response = await fetch(url, {
       credentials: "same-origin",
-      ...init,
+      ...fetchInit,
       headers,
       signal: controller.signal,
     });
@@ -223,7 +239,7 @@ async function request(path, init) {
     const elapsed = Date.now() - started;
     if (err && err.name === "AbortError") {
       logger.error(`✗ ${method} ${path} 超时 ${elapsed}ms（AbortController）`);
-      throw new Error(`请求超时（${REQUEST_TIMEOUT_MS / 1000}s）：${path}`);
+      throw new Error(`请求超时（${timeoutMs / 1000}s）：${path}`);
     }
     logger.error(`✗ ${method} ${path} 网络/传输失败 ${elapsed}ms`, err);
     throw err;
@@ -247,6 +263,10 @@ async function request(path, init) {
     const error = new Error(detail.message || `HTTP ${response.status}`);
     error.code = detail.code || `http_${response.status}`;
     error.status = response.status;
+    error.detail = detail;
+    error.step = detail.step;
+    error.workspace_kept = detail.workspace_kept;
+    error.rollback_failed = detail.rollback_failed;
     logger.warn(`✗ ${method} ${path} ${response.status} [${error.code}] ${error.message}`);
     throw error;
   }
@@ -259,6 +279,16 @@ const postJson = (path, payload) =>
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(payload || {}),
+  });
+
+// Agent operations snapshot skills / create workspaces, so they can exceed the
+// page's normal 15s deadline (the plugin waits up to 60s for the host).
+const postJsonSlow = (path, payload) =>
+  request(path, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(payload || {}),
+    timeoutMs: 180000,
   });
 
 function readFileAsBytes(file) {
@@ -297,6 +327,7 @@ whenHost((paw) => {
   const Select = antd.Select;
   const Tabs = antd.Tabs;
   const Table = antd.Table;
+  const Modal = antd.Modal;
   const Empty = antd.Empty || (() => h("div", null, "暂无数据"));
   const Spin = antd.Spin || (() => h("div", null, "加载中…"));
   const Typography = antd.Typography || {};
@@ -1154,23 +1185,930 @@ whenHost((paw) => {
       : h("div", null, rows.length, " 个已安装");
   }
 
+  // ---------------------------------------------------------- agent market ---
+
+  function AgentInstallDialog({
+    target,
+    name,
+    setName,
+    version,
+    setVersion,
+    installing,
+    step,
+    error,
+    result,
+    onClose,
+    onInstall,
+  }) {
+    if (!target) return null;
+    const lines = [];
+    if (error) {
+      lines.push(`${error.code ? `[${error.code}] ` : ""}${error.message}`);
+      if (error.step) lines.push(`失败步骤：${error.step}`);
+      if (error.rollback_failed) {
+        lines.push("自动回滚失败：宿主里可能残留一个未完成的智能体，请到智能体列表检查。");
+      } else if (error.workspace_kept) {
+        lines.push(`配置已回滚；工作区保留在 ${error.workspace_kept}，可手工清理。`);
+      }
+    }
+
+    const body = h(
+      "div",
+      { style: { display: "grid", gap: 10 } },
+      h(
+        Space,
+        { wrap: true },
+        h(Text, { strong: true }, target.name),
+        h(Text, { type: "secondary", code: true }, `${target.slug}@${target.latest_version || "-"}`),
+      ),
+      h(
+        Space,
+        { wrap: true },
+        h(Text, null, "本机显示名"),
+        Input
+          ? h(Input, {
+              value: name,
+              disabled: installing || Boolean(result),
+              style: { width: 260 },
+              onChange: (event) => setName(event.target.value),
+            })
+          : null,
+        h(Text, null, "版本"),
+        Input
+          ? h(Input, {
+              value: version,
+              disabled: installing || Boolean(result),
+              style: { width: 120 },
+              placeholder: "latest",
+              onChange: (event) => setVersion(event.target.value),
+            })
+          : null,
+      ),
+      h(
+        Paragraph,
+        { type: "secondary", style: { margin: 0 } },
+        "安装会在本机新建一个独立智能体：写入人设、由 QwenPaw 宿主扫描并安装捆绑技能、应用安全配置子集。不会覆盖现有智能体。",
+      ),
+      installing
+        ? h(Alert, { type: "info", showIcon: true, message: "正在安装", description: step })
+        : null,
+      error
+        ? h(Alert, {
+            type: "error",
+            showIcon: true,
+            message: "安装失败",
+            description: h(
+              "ul",
+              { style: { margin: 0, paddingLeft: 18 } },
+              lines.map((line, index) => h("li", { key: index }, line)),
+            ),
+          })
+        : null,
+      result
+        ? h(Alert, {
+            type: "success",
+            showIcon: true,
+            message: `已安装 ${result.name || target.name}`,
+            description: `agent_id：${result.agent_id}${
+              result.workspace_dir ? `｜工作区：${result.workspace_dir}` : ""
+            }`,
+          })
+        : null,
+    );
+
+    const footer = result
+      ? [h(Button, { key: "close", onClick: onClose }, "关闭")]
+      : [
+          h(Button, { key: "cancel", onClick: onClose, disabled: installing }, "取消"),
+          h(
+            Button,
+            { key: "install", type: "primary", loading: installing, onClick: onInstall },
+            "开始安装",
+          ),
+        ];
+
+    if (Modal) {
+      return h(
+        Modal,
+        {
+          open: true,
+          title: "安装智能体",
+          footer,
+          closable: !installing,
+          maskClosable: !installing,
+          onCancel: onClose,
+        },
+        body,
+      );
+    }
+    return h(
+      Card,
+      { size: "small", title: "安装智能体" },
+      body,
+      h("div", { style: { marginTop: 12 } }, h(Space, null, footer)),
+    );
+  }
+
+  function AgentMarketTab({ tenant, installed, markInstalled, onNotice, refreshToken }) {
+    const [items, setItems] = useState([]);
+    const [query, setQuery] = useState("");
+    const [loading, setLoading] = useState(false);
+    const [target, setTarget] = useState(null);
+    const [targetName, setTargetName] = useState("");
+    const [installVersion, setInstallVersion] = useState("latest");
+    const [installing, setInstalling] = useState(false);
+    const [installStep, setInstallStep] = useState("");
+    const [installError, setInstallError] = useState(null);
+    const [installResult, setInstallResult] = useState(null);
+
+    const load = useCallback(
+      async (value) => {
+        setLoading(true);
+        logger.debug(`智能体市场加载 q=${JSON.stringify(value || "")}`);
+        try {
+          const body = await getJson(
+            `/offline-market/agents?q=${encodeURIComponent(value || "")}&limit=50`,
+          );
+          const next = body.items || [];
+          setItems(next);
+          logger.debug(
+            `智能体市场 ${next.length} 条`,
+            next.map((item) => `${item.slug}@${item.latest_version || "-"}`),
+          );
+        } catch (err) {
+          logger.error("智能体市场加载失败", err);
+          onNotice({ type: "error", text: err.message });
+          setItems([]);
+        } finally {
+          setLoading(false);
+        }
+      },
+      [onNotice],
+    );
+
+    useEffect(() => {
+      load(query);
+    }, [load, refreshToken]);
+
+    useEffect(() => {
+      if (!installing) return undefined;
+      const steps = [
+        "创建智能体…",
+        "等待工作区就绪…",
+        "写入人设…",
+        "安装技能（宿主扫描）…",
+        "应用配置…",
+      ];
+      setInstallStep(steps[0]);
+      let index = 0;
+      const timer = setInterval(() => {
+        index = Math.min(index + 1, steps.length - 1);
+        setInstallStep(steps[index]);
+      }, 2500);
+      return () => clearInterval(timer);
+    }, [installing]);
+
+    const openInstall = useCallback((row) => {
+      setTarget(row);
+      setTargetName(row.name || "");
+      setInstallVersion("latest");
+      setInstallError(null);
+      setInstallResult(null);
+      setInstallStep("创建智能体…");
+    }, []);
+
+    const closeInstall = useCallback(() => {
+      if (installing) return;
+      setTarget(null);
+      setInstallError(null);
+      setInstallResult(null);
+    }, [installing]);
+
+    const runInstall = useCallback(async () => {
+      if (!target) return;
+      setInstalling(true);
+      setInstallError(null);
+      setInstallResult(null);
+      const started = Date.now();
+      try {
+        logger.info(`开始安装智能体 ${target.slug}`);
+        const body = await postJsonSlow(
+          `/offline-market/agents/${encodeURIComponent(target.slug)}/install`,
+          {
+            version: installVersion.trim() || "latest",
+            target_name: targetName.trim() || undefined,
+          },
+        );
+        logger.info(`智能体安装完成 ${target.slug}（${Date.now() - started}ms）`, body);
+        markInstalled(target.slug);
+        setInstallResult(body);
+        onNotice({
+          type: "success",
+          text: `已安装智能体 ${body.name || target.name}（${body.agent_id}）`,
+        });
+      } catch (err) {
+        logger.error(`智能体安装失败 ${target.slug}（${Date.now() - started}ms）`, err);
+        setInstallError(err);
+      } finally {
+        setInstalling(false);
+        setInstallStep("");
+      }
+    }, [target, targetName, installVersion, markInstalled, onNotice]);
+
+    const columns = useMemo(
+      () => [
+        {
+          title: "智能体",
+          dataIndex: "name",
+          render: (_, row) =>
+            h(
+              "div",
+              null,
+              h("div", null, h(Text, { strong: true }, row.name)),
+              h(
+                Text,
+                { type: "secondary", code: true },
+                `${row.slug}@${row.latest_version || "-"}`,
+              ),
+            ),
+        },
+        {
+          title: "描述",
+          dataIndex: "description",
+          ellipsis: true,
+          render: (value) => value || h(Text, { type: "secondary" }, "—"),
+        },
+        {
+          title: "可见性",
+          dataIndex: "visibility",
+          width: 110,
+          render: (value) =>
+            h(
+              Tag,
+              { color: value === "public" ? "blue" : "gold" },
+              VISIBILITY_LABEL[value] || value,
+            ),
+        },
+        {
+          title: "发布者",
+          dataIndex: "owner_name",
+          width: 160,
+          render: (_, row) => {
+            const label = row.owner_name || row.owner_tenant || "-";
+            const mine = Boolean(tenant) && row.owner_tenant === tenant;
+            return h("span", { title: row.owner_tenant || "" }, mine ? `${label}（我）` : label);
+          },
+        },
+        { title: "技能", dataIndex: "skill_count", width: 70 },
+        { title: "版本数", dataIndex: "versions", width: 80 },
+        {
+          title: "操作",
+          width: 150,
+          render: (_, row) =>
+            installed.has(row.slug)
+              ? h(Button, { size: "small", disabled: true }, "已安装")
+              : h(
+                  Button,
+                  {
+                    type: "primary",
+                    size: "small",
+                    disabled: installing,
+                    loading: installing && target && target.slug === row.slug,
+                    onClick: () => openInstall(row),
+                  },
+                  "安装",
+                ),
+        },
+      ],
+      [installed, installing, target, openInstall],
+    );
+
+    return h(
+      "div",
+      { style: { display: "flex", flexDirection: "column", gap: 12 } },
+      h(
+        Space,
+        null,
+        Input
+          ? h(Input, {
+              placeholder: "搜索智能体名或标识符",
+              value: query,
+              allowClear: true,
+              style: { width: 260 },
+              onChange: (event) => setQuery(event.target.value),
+              onPressEnter: () => load(query),
+            })
+          : null,
+        h(Button, { onClick: () => load(query) }, "搜索"),
+        h(Button, { onClick: () => load("") }, "全部"),
+      ),
+      loading
+        ? h(Spin)
+        : Table
+          ? h(Table, {
+              rowKey: "slug",
+              size: "small",
+              pagination: false,
+              dataSource: items,
+              columns,
+              locale: { emptyText: h(Empty, { description: "还没有智能体" }) },
+            })
+          : h(
+              "div",
+              null,
+              items.map((item) => h(Card, { key: item.slug, size: "small" }, item.name)),
+            ),
+      h(AgentInstallDialog, {
+        target,
+        name: targetName,
+        setName: setTargetName,
+        version: installVersion,
+        setVersion: setInstallVersion,
+        installing,
+        step: installStep,
+        error: installError,
+        result: installResult,
+        onClose: closeInstall,
+        onInstall: runInstall,
+      }),
+    );
+  }
+
+  function AgentPublishTab({ onNotice, onPublished }) {
+    const [agents, setAgents] = useState([]);
+    const [loadingAgents, setLoadingAgents] = useState(true);
+    const [source, setSource] = useState("");
+    const [slug, setSlug] = useState("");
+    const [version, setVersion] = useState("1.0.0");
+    const [visibility, setVisibility] = useState("public");
+    const [preview, setPreview] = useState(null);
+    const [previewBusy, setPreviewBusy] = useState(false);
+    const [busy, setBusy] = useState(false);
+    const [error, setError] = useState("");
+    const publisherName = useCurrentUserName();
+
+    const loadAgents = useCallback(async () => {
+      setLoadingAgents(true);
+      try {
+        const body = await getJson("/offline-market/host-agents");
+        const items = body.items || [];
+        setAgents(items);
+        logger.debug(
+          `本机可发布智能体 ${items.length} 个`,
+          items.map((item) => `${item.id}(${item.name})`),
+        );
+      } catch (err) {
+        logger.error("本机智能体列表加载失败", err);
+        setError(err.message);
+      } finally {
+        setLoadingAgents(false);
+      }
+    }, []);
+
+    useEffect(() => {
+      loadAgents();
+    }, [loadAgents]);
+
+    const selected = useMemo(() => agents.find((item) => item.id === source) || null, [agents, source]);
+
+    const doPreview = useCallback(async () => {
+      if (!source) {
+        setError("请先选择要发布的智能体");
+        return;
+      }
+      setPreviewBusy(true);
+      setError("");
+      try {
+        const body = await postJsonSlow("/offline-market/agents/preview", {
+          source_agent_id: source,
+        });
+        setPreview(body);
+        logger.info(
+          `智能体快照预览 ${source}：${body.file_count} 个文件，${body.skills.length} 个技能`,
+        );
+      } catch (err) {
+        logger.error("智能体快照预览失败", err);
+        setError(`${err.code ? `[${err.code}] ` : ""}${err.message}`);
+        setPreview(null);
+      } finally {
+        setPreviewBusy(false);
+      }
+    }, [source]);
+
+    const submit = useCallback(async () => {
+      if (!source) {
+        setError("请先选择要发布的智能体");
+        return;
+      }
+      if (!version.trim()) {
+        setError("请填写版本号");
+        return;
+      }
+      setBusy(true);
+      setError("");
+      try {
+        const publisher = await currentUserName();
+        const body = await postJsonSlow("/offline-market/agents/publish", {
+          source_agent_id: source,
+          slug: slug.trim() || undefined,
+          version: version.trim(),
+          visibility,
+          publisher_name: publisher || undefined,
+        });
+        logger.info(`智能体发布成功 ${body.slug}@${body.version}`, body);
+        onNotice({
+          type: "success",
+          text: `已发布 ${body.slug}@${body.version}（${body.file_count} 个文件 / ${body.skill_count} 个技能）`,
+        });
+        setPreview(null);
+        onPublished && onPublished();
+      } catch (err) {
+        logger.error("智能体发布失败", err);
+        setError(`${err.code ? `[${err.code}] ` : ""}${err.message}`);
+      } finally {
+        setBusy(false);
+      }
+    }, [source, slug, version, visibility, onNotice, onPublished]);
+
+    const picker = Select
+      ? h(Select, {
+          value: source || undefined,
+          style: { width: 360 },
+          placeholder: "选择本机智能体",
+          loading: loadingAgents,
+          onChange: (value) => {
+            setSource(value);
+            setPreview(null);
+          },
+          options: agents.map((item) => ({
+            value: item.id,
+            label: `${item.name || item.id} (${item.id})`,
+          })),
+        })
+      : h(
+          "select",
+          {
+            value: source,
+            style: { width: 360, padding: "4px 8px" },
+            onChange: (event) => {
+              setSource(event.target.value);
+              setPreview(null);
+            },
+          },
+          h("option", { value: "" }, "选择本机智能体"),
+          agents.map((item) => h("option", { key: item.id, value: item.id }, `${item.name || item.id} (${item.id})`)),
+        );
+
+    return h(
+      Card,
+      { size: "small", title: "发布智能体" },
+      h(
+        "div",
+        { style: { display: "grid", gap: 10, maxWidth: 760 } },
+        agents.length
+          ? null
+          : h(Alert, {
+              type: "warning",
+              showIcon: true,
+              message: "本机没有可发布的智能体",
+              description: "先在 QwenPaw 里创建一个智能体，再回到这里发布。",
+            }),
+        h(
+          Space,
+          { wrap: true },
+          h(Text, null, "来源智能体"),
+          picker,
+          h(Button, { onClick: loadAgents, loading: loadingAgents }, "刷新"),
+        ),
+        selected
+          ? h(
+              Paragraph,
+              { type: "secondary", style: { margin: 0 } },
+              `${selected.name || selected.id}｜${selected.description || "无描述"}｜工作区 ${selected.workspace_dir || "-"}`,
+            )
+          : null,
+        h(
+          Space,
+          { wrap: true },
+          h(Text, null, "标识符（可选）"),
+          Input
+            ? h(Input, {
+                value: slug,
+                placeholder: "留空则按名称推导（中文名生成 agent-<hash>）",
+                style: { width: 200 },
+                onChange: (event) => setSlug(event.target.value),
+              })
+            : null,
+          h(Text, null, "版本"),
+          Input
+            ? h(Input, {
+                value: version,
+                placeholder: "1.0.0",
+                style: { width: 140 },
+                onChange: (event) => setVersion(event.target.value),
+              })
+            : null,
+          h(Text, null, "可见性"),
+          Select
+            ? h(Select, {
+                value: visibility,
+                style: { width: 160 },
+                onChange: setVisibility,
+                options: [
+                  { value: "public", label: "公开（全部租户）" },
+                  { value: "tenant", label: "仅本租户" },
+                ],
+              })
+            : null,
+        ),
+        h(
+          Space,
+          null,
+          h(Button, { onClick: doPreview, loading: previewBusy, disabled: !source }, "预览将打包内容"),
+          h(Button, { type: "primary", onClick: submit, loading: busy, disabled: !source }, "立即发布"),
+        ),
+        preview
+          ? h(
+              Card,
+              { size: "small", title: "预览" },
+              h(
+                "div",
+                { style: { display: "grid", gap: 6 } },
+                h(Text, null, `人设文件：${preview.md_files.join("、") || "无"}`),
+                h(Text, null, `技能：${preview.skills.join("、") || "无"}`),
+                h(
+                  Text,
+                  { type: "secondary" },
+                  `${preview.file_count} 个文件 / ${(preview.size_bytes / 1024).toFixed(1)} KB`,
+                ),
+              ),
+            )
+          : null,
+        error ? h(Alert, { type: "error", showIcon: true, message: error }) : null,
+        h(
+          Text,
+          { type: "secondary" },
+          publisherName
+            ? `发布者：${publisherName}（取当前登录账号）`
+            : "发布者：租户 id（console 未提供登录用户名）",
+        ),
+      ),
+      h(
+        Paragraph,
+        { type: "secondary", style: { marginTop: 12, marginBottom: 0 } },
+        "只打包五种白名单人设 MD + 已启用技能；不会上传 MEMORY.md、会话、记忆、模型、渠道、MCP、邮箱或凭据。版本不可变。",
+      ),
+    );
+  }
+
+  function AgentMineTab({ onNotice, refreshToken }) {
+    const [items, setItems] = useState([]);
+    const [loading, setLoading] = useState(false);
+
+    const load = useCallback(async () => {
+      setLoading(true);
+      try {
+        const body = await getJson("/offline-market/agents/mine");
+        const next = body.items || [];
+        setItems(next);
+        logger.debug(`我的智能体发布 ${next.length} 条`);
+      } catch (err) {
+        logger.error("我的智能体发布加载失败", err);
+        onNotice({ type: "error", text: err.message });
+      } finally {
+        setLoading(false);
+      }
+    }, [onNotice]);
+
+    useEffect(() => {
+      load();
+    }, [load, refreshToken]);
+
+    const act = useCallback(
+      async (row, action) => {
+        logger.info(`${action === "withdraw" ? "撤回" : "恢复"}智能体 ${row.slug}`);
+        try {
+          await postJson(`/offline-market/agents/${encodeURIComponent(row.slug)}/${action}`);
+          onNotice({
+            type: "success",
+            text: action === "withdraw" ? `已撤回 ${row.slug}` : `已恢复 ${row.slug}`,
+          });
+          load();
+        } catch (err) {
+          logger.error(`${action} 智能体失败 ${row.slug}`, err);
+          onNotice({ type: "error", text: err.message });
+        }
+      },
+      [load, onNotice],
+    );
+
+    const stateOf = (row) =>
+      row.takedown_at ? "taken_down" : row.withdrawn_at ? "withdrawn" : "active";
+
+    const columns = [
+      {
+        title: "智能体",
+        render: (_, row) =>
+          h(
+            "div",
+            null,
+            h("div", null, h(Text, { strong: true }, row.name)),
+            h(Text, { type: "secondary", code: true }, `${row.slug}@${row.latest_version || "-"}`),
+          ),
+      },
+      {
+        title: "可见性",
+        dataIndex: "visibility",
+        width: 110,
+        render: (value) =>
+          h(Tag, { color: value === "public" ? "blue" : "gold" }, VISIBILITY_LABEL[value] || value),
+      },
+      {
+        title: "状态",
+        width: 120,
+        render: (_, row) => {
+          const state = stateOf(row);
+          return h(Tag, { color: STATE_COLOR[state] }, STATE_LABEL[state]);
+        },
+      },
+      { title: "技能", dataIndex: "skill_count", width: 70 },
+      { title: "版本数", dataIndex: "versions", width: 80 },
+      {
+        title: "操作",
+        width: 170,
+        render: (_, row) => {
+          const state = stateOf(row);
+          if (state === "taken_down") {
+            return h(Text, { type: "secondary" }, "管理员已下架，无法自助恢复");
+          }
+          return h(
+            Button,
+            {
+              size: "small",
+              danger: state === "active",
+              onClick: () => act(row, state === "active" ? "withdraw" : "restore"),
+            },
+            state === "active" ? "撤回" : "恢复上架",
+          );
+        },
+      },
+    ];
+
+    return loading
+      ? h(Spin)
+      : Table
+        ? h(Table, {
+            rowKey: "slug",
+            size: "small",
+            pagination: false,
+            dataSource: items,
+            columns,
+            locale: { emptyText: h(Empty, { description: "还没有发布过智能体" }) },
+          })
+        : h("div", null, items.length, " 个智能体");
+  }
+
+  function AgentInstalledTab({ onNotice, refreshToken, onUninstalled }) {
+    const [items, setItems] = useState([]);
+    const [loading, setLoading] = useState(false);
+    const [busyId, setBusyId] = useState("");
+
+    const load = useCallback(async () => {
+      setLoading(true);
+      try {
+        const body = await getJson("/offline-market/agents/installed");
+        const next = body.items || [];
+        setItems(next);
+        logger.debug(
+          `已安装智能体 ${next.length} 个`,
+          next.map((item) => `${item.agent_id}->${item.slug}/${item.state}`),
+        );
+      } catch (err) {
+        logger.error("已安装智能体加载失败", err);
+        onNotice({ type: "error", text: err.message });
+      } finally {
+        setLoading(false);
+      }
+    }, [onNotice]);
+
+    useEffect(() => {
+      load();
+    }, [load, refreshToken]);
+
+    const remove = useCallback(
+      async (row) => {
+        setBusyId(row.agent_id);
+        try {
+          const body = await postJson(
+            `/offline-market/agents/${encodeURIComponent(row.agent_id)}/uninstall`,
+          );
+          logger.info(`已卸载智能体 ${row.agent_id}`, body);
+          onNotice({
+            type: "success",
+            text: `已卸载 ${row.name || row.agent_id}${
+              body.workspace_kept ? `；工作区保留在 ${body.workspace_kept}` : ""
+            }`,
+          });
+          onUninstalled && onUninstalled(row.slug);
+          load();
+        } catch (err) {
+          logger.error(`卸载智能体失败 ${row.agent_id}`, err);
+          onNotice({ type: "error", text: err.message });
+        } finally {
+          setBusyId("");
+        }
+      },
+      [load, onNotice, onUninstalled],
+    );
+
+    const askRemove = useCallback(
+      (row) => {
+        const detail = `只摘除宿主里的智能体配置；工作区${
+          row.workspace_dir ? `（${row.workspace_dir}）` : ""
+        }会保留，需要时请手工清理。`;
+        if (Modal && typeof Modal.confirm === "function") {
+          Modal.confirm({
+            title: `卸载 ${row.name || row.agent_id}？`,
+            content: detail,
+            okText: "卸载",
+            okType: "danger",
+            cancelText: "取消",
+            onOk: () => remove(row),
+          });
+          return;
+        }
+        if (window.confirm(`卸载 ${row.name || row.agent_id}？\n${detail}`)) {
+          remove(row);
+        }
+      },
+      [remove],
+    );
+
+    const columns = [
+      {
+        title: "智能体",
+        render: (_, row) =>
+          h(
+            "div",
+            null,
+            h("div", null, h(Text, { strong: true }, row.name || row.agent_id)),
+            h(Text, { type: "secondary", code: true }, row.agent_id),
+          ),
+      },
+      {
+        title: "市场标识",
+        render: (_, row) =>
+          h(Text, { code: true }, `${row.slug || "-"}@${row.version || "-"}`),
+      },
+      {
+        title: "市场状态",
+        width: 150,
+        render: (_, row) =>
+          h(
+            Tag,
+            { color: AGENT_STATE_COLOR[row.state] || "default" },
+            AGENT_STATE_LABEL[row.state] || row.state || "未知",
+          ),
+      },
+      {
+        title: "工作区",
+        dataIndex: "workspace_dir",
+        ellipsis: true,
+        render: (value) =>
+          value ? h("span", { title: value }, value) : h(Text, { type: "secondary" }, "—"),
+      },
+      {
+        title: "操作",
+        width: 120,
+        render: (_, row) =>
+          h(
+            Button,
+            {
+              size: "small",
+              danger: true,
+              loading: busyId === row.agent_id,
+              onClick: () => askRemove(row),
+            },
+            "卸载",
+          ),
+      },
+    ];
+
+    return loading
+      ? h(Spin)
+      : Table
+        ? h(Table, {
+            rowKey: "agent_id",
+            size: "small",
+            pagination: false,
+            dataSource: items,
+            columns,
+            locale: { emptyText: h(Empty, { description: "还没有从本市场安装过智能体" }) },
+          })
+        : h("div", null, items.length, " 个已安装智能体");
+  }
+
+  function AgentMarketPage({ config, onNotice }) {
+    const [marketToken, setMarketToken] = useState(0);
+    const [revision, setRevision] = useState(0);
+    const [installed, setInstalled] = useState(() => new Set());
+
+    const loadInstalled = useCallback(async () => {
+      try {
+        const body = await getJson("/offline-market/agents/installed");
+        const next = new Set(
+          (body.items || []).map((item) => item.slug).filter((slug) => Boolean(slug)),
+        );
+        setInstalled(next);
+        logger.debug(`智能体已安装集合 ${next.size} 个`, [...next]);
+      } catch (err) {
+        logger.warn("智能体已安装集合加载失败（安装按钮照常可用）", err);
+      }
+    }, []);
+
+    useEffect(() => {
+      loadInstalled();
+    }, [loadInstalled, revision]);
+
+    const markInstalled = useCallback((slug) => {
+      if (!slug) return;
+      setInstalled((previous) => {
+        if (previous.has(slug)) return previous;
+        return new Set(previous).add(slug);
+      });
+    }, []);
+
+    const onPublished = useCallback(() => {
+      setMarketToken((value) => value + 1);
+    }, []);
+
+    const onUninstalled = useCallback((slug) => {
+      setRevision((value) => value + 1);
+      if (!slug) return;
+      setInstalled((previous) => {
+        if (!previous.has(slug)) return previous;
+        const next = new Set(previous);
+        next.delete(slug);
+        return next;
+      });
+    }, []);
+
+    const tabs = [
+      {
+        key: "market",
+        label: "市场",
+        children: h(AgentMarketTab, {
+          tenant: (config && config.tenant) || "",
+          installed,
+          markInstalled,
+          onNotice,
+          refreshToken: marketToken,
+        }),
+      },
+      {
+        key: "publish",
+        label: "发布",
+        children: h(AgentPublishTab, { onNotice, onPublished }),
+      },
+      {
+        key: "mine",
+        label: "我的发布",
+        children: h(AgentMineTab, { onNotice, refreshToken: marketToken }),
+      },
+      {
+        key: "installed",
+        label: "已安装",
+        children: h(AgentInstalledTab, {
+          onNotice,
+          refreshToken: revision,
+          onUninstalled,
+        }),
+      },
+    ];
+
+    return h(
+      "div",
+      { style: { display: "flex", flexDirection: "column", gap: 12 } },
+      h(Alert, {
+        type: "info",
+        showIcon: true,
+        message: "智能体安装会在本机新建一个独立智能体",
+        description:
+          "人设与配置来自市场，捆绑技能仍由 QwenPaw 宿主扫描安装。卸载只摘除配置，不删除工作区。",
+      }),
+      Tabs
+        ? h(Tabs, { items: tabs, defaultActiveKey: "market" })
+        : h("div", null, tabs.map((tab) => h("section", { key: tab.key }, tab.children))),
+    );
+  }
+
   // ------------------------------------------------------------------ page ---
 
-  function MarketPage() {
-    const { config, limits, error, setError } = useMarketData();
-    const [notice, setNotice] = useState(null);
+  function SkillsPage({ config, limits, onNotice }) {
     const [refreshToken, setRefreshToken] = useState(0);
     // Bumped only by a publish: refreshes the market list once without the
     // spinner flash that a tab switch would cause.
     const [marketToken, setMarketToken] = useState(0);
-
-    const onNotice = useCallback((value) => {
-      logger.debug(`通知 [${value.type}] ${value.text}`);
-      setNotice(value);
-      if (value && value.type === "success") {
-        setTimeout(() => setNotice(null), 6000);
-      }
-    }, []);
 
     const onPublished = useCallback(() => {
       setRefreshToken((value) => value + 1);
@@ -1205,10 +2143,40 @@ whenHost((paw) => {
       },
     ];
 
+    return Tabs
+      ? h(Tabs, { items: tabs, defaultActiveKey: "market" })
+      : h("div", null, tabs.map((tab) => h("section", { key: tab.key }, tab.children)));
+  }
+
+  function MarketPage() {
+    const { config, limits, error, setError } = useMarketData();
+    const [notice, setNotice] = useState(null);
+
+    const onNotice = useCallback((value) => {
+      logger.debug(`通知 [${value.type}] ${value.text}`);
+      setNotice(value);
+      if (value && value.type === "success") {
+        setTimeout(() => setNotice(null), 6000);
+      }
+    }, []);
+
+    const tabs = [
+      {
+        key: "skills",
+        label: "技能",
+        children: h(SkillsPage, { config, limits, onNotice }),
+      },
+      {
+        key: "agents",
+        label: "智能体",
+        children: h(AgentMarketPage, { config, onNotice }),
+      },
+    ];
+
     return h(
       "div",
       { style: { padding: 16, display: "flex", flexDirection: "column", gap: 12 } },
-      h(Title, { level: 4, style: { margin: 0 } }, "技能市场（内网）"),
+      h(Title, { level: 4, style: { margin: 0 } }, "内网市场"),
       h(StatusBanner, { config, error }),
       notice
         ? h(Alert, { type: notice.type, showIcon: true, message: notice.text, closable: true })
@@ -1216,7 +2184,7 @@ whenHost((paw) => {
       Tabs
         ? h(Tabs, {
             items: tabs,
-            defaultActiveKey: "market",
+            defaultActiveKey: "skills",
             // A tab switch must not refetch: the pane mounts on first visit and
             // refreshing here used to run the whole N+1 fan-out twice.
             onChange: () => setError(null),
@@ -1236,8 +2204,8 @@ whenHost((paw) => {
     component: MarketPage,
     meta: {
       domain: "extensions",
-      title: "技能市场（内网）",
-      description: "离线技能市场",
+      title: "内网市场",
+      description: "离线技能与智能体市场",
       scope: "global",
       layout: "standard",
       navigation: "rail",
@@ -1251,7 +2219,7 @@ whenHost((paw) => {
     location: "primary.agentScoped",
     after: "core.marketplace",
     order: 16,
-    label: "技能市场（内网）",
+    label: "内网市场",
     icon: "🧩",
     route: "offline-market.page",
   });

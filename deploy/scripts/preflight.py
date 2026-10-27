@@ -21,6 +21,12 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+try:
+    from runtime_probe import parse_result, run_python
+except ImportError:  # run from a different cwd
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from runtime_probe import parse_result, run_python
+
 GREEN, RED, YELLOW, RESET = "\033[32m", "\033[31m", "\033[33m", "\033[0m"
 failures = 0
 
@@ -114,8 +120,11 @@ def check_public_url(market_url: str, public_url: str) -> None:
     )
 
 
+ACCEPTED_SCAN_MODES = {"block", "warn"}
+
+
 def check_scan_dirs(paths: list[Path]) -> None:
-    print("\n租户 runtime 扫描模式（必须 block）")
+    print("\n租户 runtime 扫描模式（block 推荐，warn 允许，off 拒绝）")
     if not paths:
         report(False, "未提供 --runtimes-dir", "无法校验租户 runtime 配置", warn=True)
         return
@@ -128,13 +137,20 @@ def check_scan_dirs(paths: list[Path]) -> None:
         except Exception as exc:  # noqa: BLE001
             offenders.append(f"{path}（读取失败：{exc}）")
             continue
-        if mode == "block":
+        if mode in ACCEPTED_SCAN_MODES:
             good += 1
         else:
             offenders.append(f"{path}（mode={mode!r}）")
-    report(not offenders, f"{good}/{len(paths)} 个 config.json 为 block", "；".join(offenders[:5]))
+    report(
+        not offenders,
+        f"{good}/{len(paths)} 个 config.json 扫描已开启（block/warn）",
+        "；".join(offenders[:5]),
+    )
     if offenders:
-        print("        修复：deploy/scripts/enforce-scan-mode.py --runtimes-dir <hub runtimes>")
+        print(
+            "        修复：把 security.skill_scanner.mode 改成 block（推荐）或 warn；"
+            "或跑 deploy/scripts/enforce-scan-mode.py --runtimes-dir <hub runtimes>"
+        )
 
 
 def check_runtime_urls(public_url: str, paths: list[Path]) -> str | None:
@@ -213,6 +229,97 @@ def check_runtime_container(container: str, market_url: str) -> None:
               "并同步改后端 MARKET_PUBLIC_URL（见 OPS §2.5）")
 
 
+def check_runtime_agent_api(container: str) -> None:
+    """From inside the runtime: plugin route -> its own host API.
+
+    This is the Docker-specific failure mode the host-side checks cannot see:
+    the published port is bound to a random loopback port, auth is on, and the
+    runtime boundary requires ``X-QwenPaw-Runtime-Token``.
+    """
+    print("\n租户 runtime 容器内的插件 / 宿主 API")
+    if not container:
+        report(False, "未提供 --runtime-container", "宿主 API 自检未执行", warn=True)
+        return
+    try:
+        completed = run_python(container, RUNTIME_PROBE, timeout=90)
+    except Exception as exc:  # noqa: BLE001
+        report(False, f"docker exec {container}", str(exc), warn=True)
+        return
+    output = (completed.stdout or "") + (completed.stderr or "")
+    result = parse_result(output)
+    if result is None:
+        report(False, "容器内插件探针输出", output[-500:] or "无输出")
+        return
+
+    config = result.get("config") if isinstance(result.get("config"), dict) else {}
+    config_status = result.get("config_status")
+    report(config_status == 200, "插件 /api/offline-market/config", str(config_status))
+    if config_status == 200:
+        print(
+            f"        host_api_url={config.get('host_api_url') or '-'}"
+            f"｜market_url={config.get('market_url') or '-'}"
+            f"｜runtime_token={'有' if config.get('runtime_token_present') else '无'}"
+        )
+    else:
+        return
+
+    health = result.get("health") if isinstance(result.get("health"), dict) else {}
+    report(
+        health.get("ok") is True,
+        "插件 → 宿主 API（/host-health）",
+        str(health.get("message") or health.get("code") or health),
+    )
+    if health.get("ok") is True:
+        print(
+            f"        host_api_url={health.get('host_api_url') or '-'}"
+            f"｜agents={health.get('agent_count')}"
+        )
+    else:
+        print("        修复：确认 runtime 容器内 127.0.0.1:${QWENPAW_PORT} 可访问，"
+              "且 QWENPAW_RUNTIME_INTERNAL_TOKEN 已注入（Hub 默认会注入）")
+
+
+RUNTIME_PROBE = r'''
+import json, os, urllib.error, urllib.request
+
+port = os.environ.get("QWENPAW_PORT", "8088") or "8088"
+base = "http://127.0.0.1:" + port
+token = os.environ.get("QWENPAW_RUNTIME_INTERNAL_TOKEN", "")
+
+def get(path):
+    headers = {"accept": "application/json", "x-qwenpaw-runtime-token": token}
+    request = urllib.request.Request(base + path, headers=headers, method="GET")
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            raw = response.read()
+            return response.status, (json.loads(raw) if raw else {})
+    except urllib.error.HTTPError as exc:
+        raw = exc.read()
+        try:
+            payload = json.loads(raw) if raw else {}
+        except Exception:
+            payload = {"raw": raw.decode("utf-8", "replace")}
+        return exc.code, payload
+    except Exception as exc:
+        return 0, {"error": repr(exc)}
+
+config_status, config = get("/api/offline-market/config")
+health_status, health = get("/api/offline-market/host-health")
+print(
+    "__RUNTIME_PROBE__"
+    + json.dumps(
+        {
+            "config_status": config_status,
+            "config": config,
+            "health_status": health_status,
+            "health": health,
+        },
+        ensure_ascii=False,
+    )
+)
+'''
+
+
 def check_app(app_url: str) -> None:
     print("\nQwenPaw 控制台")
     base = app_url.rstrip("/")
@@ -259,7 +366,7 @@ def main() -> int:
     )
     parser.add_argument(
         "--runtime-container",
-        help="租户 runtime 的容器名（可选）：从容器内部探一次后端可达性",
+        help="租户 runtime 的容器名（可选）：从容器内部探后端可达性与插件→宿主 API",
     )
     parser.add_argument("--qwenpaw", help="qwenpaw 可执行文件路径（可选）")
     args = parser.parse_args()
@@ -275,6 +382,7 @@ def main() -> int:
     check_scan_dirs(configs)
     runtime_url = check_runtime_urls(public_url, configs)
     check_runtime_container(args.runtime_container, runtime_url or public_url)
+    check_runtime_agent_api(args.runtime_container)
     if args.app_url:
         check_app(args.app_url)
     if args.qwenpaw:

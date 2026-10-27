@@ -34,11 +34,11 @@ impl ApiError {
         }
     }
 
-    fn not_found(what: &str) -> Self {
+    pub(crate) fn not_found(what: &str) -> Self {
         Self::new(StatusCode::NOT_FOUND, "not_found", what)
     }
 
-    fn db(err: rusqlite::Error) -> Self {
+    pub(crate) fn db(err: rusqlite::Error) -> Self {
         error!(error = %err, "database error");
         Self::new(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -47,11 +47,11 @@ impl ApiError {
         )
     }
 
-    fn forbidden(message: impl Into<String>) -> Self {
+    pub(crate) fn forbidden(message: impl Into<String>) -> Self {
         Self::new(StatusCode::FORBIDDEN, "forbidden", message)
     }
 
-    fn conflict(code: &'static str, message: impl Into<String>) -> Self {
+    pub(crate) fn conflict(code: &'static str, message: impl Into<String>) -> Self {
         Self::new(StatusCode::CONFLICT, code, message)
     }
 }
@@ -72,7 +72,7 @@ impl IntoResponse for ApiError {
     }
 }
 
-type ApiResult<T> = Result<T, ApiError>;
+pub(crate) type ApiResult<T> = Result<T, ApiError>;
 
 // ----------------------------------------------------------------- models ---
 
@@ -836,7 +836,7 @@ pub async fn fetch_bundle(
 
 /// Publisher names are labels, not identities: anything unusable is dropped
 /// instead of failing the publish (ownership is the tenant header, always).
-fn clean_publisher_name(raw: Option<&str>) -> Option<String> {
+pub(crate) fn clean_publisher_name(raw: Option<&str>) -> Option<String> {
     let cleaned: String = raw?.chars().filter(|c| !c.is_control()).take(64).collect();
     let cleaned = cleaned.trim().to_string();
     if cleaned.is_empty() {
@@ -850,7 +850,7 @@ fn db_ref(db: &rusqlite::Connection) -> &rusqlite::Connection {
     db
 }
 
-fn derive_slug(name: &str) -> Option<String> {
+pub(crate) fn derive_slug(name: &str) -> Option<String> {
     let slug: String = name
         .trim()
         .to_lowercase()
@@ -867,7 +867,7 @@ fn derive_slug(name: &str) -> Option<String> {
 
 /// Naive compare: numeric segments compare numerically, everything else
 /// lexicographically. Enough to keep `latest` from moving backwards.
-fn compare_versions(a: &str, b: &str) -> std::cmp::Ordering {
+pub(crate) fn compare_versions(a: &str, b: &str) -> std::cmp::Ordering {
     let split = |v: &str| -> Vec<String> { v.split(['.', '-', '+']).map(str::to_string).collect() };
     let (av, bv) = (split(a), split(b));
     for i in 0..av.len().max(bv.len()) {

@@ -4,7 +4,7 @@ QwenPaw 2.2.2 离线技能市场的后端（Rust + axum + SQLite）。**不做�
 
 ```bash
 cargo run                 # 默认 0.0.0.0:8080, data/market.sqlite3
-cargo test                # 20 个测试（10 单测 + 10 集成）
+cargo test                # 47 个测试（24 单测 + 23 集成）
 ```
 
 首次启动若未设置 `ADMIN_PASSWORD`，会生成一次性管理员密码并打印一次。
@@ -173,6 +173,47 @@ docker load -i offline-market-image.tar
 - **发布闸门**：必须是合法路径（无 `..`/绝对路径/反斜杠/盘符/控制字符）、必须含 `SKILL.md`、`SKILL.md` frontmatter 必须有非空 `name` 与 `description`、体积与文件数达标。
   - frontmatter 这条不是洁癖：宿主 `qwenpaw/agents/skill_system/store.py:validate_skill_content` 会拒绝安装缺 `description` 的包，**实测**发布成功但安装失败。前置拦截只是把错误提前。
   - 闸门**不限制文件类型**（PLAN §1 的决定）：`.so`/`.exe` 能进市场。真正的恶意代码防线在安装侧，见下。
+
+## 智能体市场（MVP）
+
+同一进程同时提供 agent 市场。包格式、宿主安装链路与后续安全项见
+[`docs/AGENT_MARKET.md`](../docs/AGENT_MARKET.md)；当前按决定**不启用独立额度**，
+只有 64 MiB 的 HTTP 请求体上限。
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| GET | `/api/v1/agents?q=&page=&limit=` | 公开 + 自己的私有，已撤回/下架不出现 |
+| GET | `/api/v1/agents/mine` | 自己的全部（含已撤回） |
+| GET | `/api/v1/agents/{slug}/status` | `active` / `withdrawn` / `taken_down` |
+| POST | `/api/v1/agents` | 发布不可变版本 |
+| POST | `/api/v1/agents/{slug}/withdraw` | 属主撤回 |
+| POST | `/api/v1/agents/{slug}/restore` | 属主恢复；被下架 → 409 |
+| GET | `/api/v1/agents/{slug}/{version}/bundle` | 取包；`version=latest` 走指针 |
+| GET | `/admin/api/agents?q=&limit=` | 管理端全量列表 |
+| POST | `/admin/api/agents/{slug}/takedown` | `{reason}` 整包下架 |
+| POST | `/admin/api/agents/{slug}/restore` | 撤销下架 |
+| GET | `/admin/api/audit?kind=agent&limit=` | 审计按 `kind` 过滤（`skill`/`agent`） |
+
+发布请求（`name` / `description` 来自包内 `manifest.json`）：
+
+```json
+{
+  "slug": "qa-agent",
+  "version": "1.0.0",
+  "visibility": "public",
+  "publisher_name": "张三",
+  "files": {
+    "manifest.json": "{\"schema\":1,\"name\":\"QA Agent\",\"description\":\"...\",\"language\":\"zh\",\"profile\":{\"thinking_level\":\"medium\",\"disabled_tools\":[\"browser\"]},\"md_files\":[\"SOUL.md\"],\"skills\":[\"demo-skill\"]}",
+    "SOUL.md": "# soul\n",
+    "skills/demo-skill/SKILL.md": "---\nname: demo-skill\ndescription: ...\n---\n"
+  }
+}
+```
+
+基础校验（不做文件类型限制）：`manifest.json` 必须在根、`schema=1`、根目录只允许
+`manifest.json` + 五个白名单 MD、非 MD 文件必须在 `skills/<name>/` 下、
+每个声明技能必须有合法 frontmatter 的 `SKILL.md`、未知 manifest 字段拒绝。
+版本不可变、slug 归属、私有隔离、撤回/下架语义与技能完全一致；审计写 `kind=agent`。
 
 ## 部署要求：`QWENPAW_SKILL_SCAN_MODE` 不能是 `off`
 

@@ -96,7 +96,7 @@ def main() -> int:
     ok = (
         report["has_host"]
         and bool(ours)
-        and "技能市场" in report["page_text"]
+        and "内网市场" in report["page_text"]
         and report.get("install_clicked")
         and "已安装" in (report.get("page_text_after_install") or "")
         and not report["page_errors"]

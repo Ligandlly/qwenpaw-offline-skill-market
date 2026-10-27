@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """离线技能市场端到端验收（stdlib only，无第三方依赖）。
 
-两个阶段：
+三个阶段：
 
   A. 后端自检（自带后端进程，用临时库，不碰生产数据）
      启动 → 发布 → 列表 → 下载 → 私有隔离 403 → 版本不可变 409 →
@@ -12,6 +12,10 @@
      provider 可用 → 宿主搜索 → 宿主安装任务完成 → 管理员下架 →
      搜索消失 + 重装 410
 
+  C. Docker 管理的 Hub runtime（可选）
+     发布临时智能体 → 在容器内调用插件安装 → 校验人设/技能/账本 →
+     卸载 → 撤回临时智能体
+
 用法：
     # 只跑 A（离线机器上最常用）
     python3 e2e.py --binary ./offline-market-backend
@@ -19,6 +23,11 @@
     # A + B（需要 QwenPaw app 已在运行，且插件已装、env 已设）
     python3 e2e.py --binary ./offline-market-backend \
         --app-url http://127.0.0.1:8123 --tenant tenant-b
+
+    # 只跑 C（Docker 管理的 runtime；需要 docker 权限）
+    python3 e2e.py --skip-a --skip-b \
+        --runtime-container qwenpaw-hub-xxxx-personal-xxxx \
+        --market-url http://172.17.0.1:8080 --tenant tenant-b
 
 退出码：0 = 全通过。
 """
@@ -37,6 +46,13 @@ import tempfile
 import time
 import urllib.error
 import urllib.request
+from pathlib import Path
+
+try:
+    from runtime_probe import parse_result, run_python
+except ImportError:  # run from a different cwd
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from runtime_probe import parse_result, run_python
 
 PASS, FAIL = "\033[32mPASS\033[0m", "\033[31mFAIL\033[0m"
 results: list[tuple[bool, str, str]] = []
@@ -299,7 +315,7 @@ def phase_b(app_url: str, tenant: str, market_url: str, admin: tuple[str, str]) 
     if ours:
         started_ok &= check(
             ours[0].get("available") is True,
-            "provider 可用（配置齐全且扫描为 block）",
+            "provider 可用（配置齐全且扫描已开启）",
             str(ours[0].get("reason")),
         )
 
@@ -397,16 +413,227 @@ def phase_b(app_url: str, tenant: str, market_url: str, admin: tuple[str, str]) 
     return started_ok
 
 
+AGENT_PROBE = r'''
+import json, os, shutil, sys, urllib.error, urllib.parse, urllib.request
+from pathlib import Path
+
+args = json.loads(sys.argv[1])
+slug = args["slug"]
+version = args["version"]
+target = args["target_name"]
+marker = args["marker"]
+skill = args["skill"]
+port = os.environ.get("QWENPAW_PORT", "8088") or "8088"
+base = "http://127.0.0.1:" + port
+token = os.environ.get("QWENPAW_RUNTIME_INTERNAL_TOKEN", "")
+steps = []
+agent_id = None
+
+def step(name, ok, detail=""):
+    steps.append({"name": name, "ok": bool(ok), "detail": str(detail)[:800]})
+    return bool(ok)
+
+def call(method, path, body=None, timeout=180):
+    data = json.dumps(body, ensure_ascii=False).encode("utf-8") if body is not None else None
+    headers = {"accept": "application/json", "x-qwenpaw-runtime-token": token}
+    if data is not None:
+        headers["content-type"] = "application/json"
+    request = urllib.request.Request(base + path, data=data, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            raw = response.read()
+            return response.status, (json.loads(raw) if raw else {})
+    except urllib.error.HTTPError as exc:
+        raw = exc.read()
+        try:
+            payload = json.loads(raw) if raw else {}
+        except Exception:
+            payload = {"raw": raw.decode("utf-8", "replace")}
+        return exc.code, payload
+    except Exception as exc:
+        return 0, {"error": repr(exc)}
+
+try:
+    status, config = call("GET", "/api/offline-market/config", timeout=20)
+    step("插件路由可用（/offline-market/config）", status == 200, config)
+    step(
+        "宿主 API 地址已解析",
+        bool(config.get("host_api_url")),
+        config.get("host_api_url") or config.get("host_api_error"),
+    )
+    if status != 200:
+        raise RuntimeError("plugin config failed")
+
+    status, result = call(
+        "POST",
+        "/api/offline-market/agents/%s/install" % urllib.parse.quote(slug, safe=""),
+        {"version": version, "target_name": target},
+        timeout=240,
+    )
+    agent_id = result.get("agent_id") if isinstance(result, dict) else None
+    installed = step("安装智能体", status == 200 and bool(agent_id), result)
+    if not installed:
+        raise RuntimeError("install failed")
+
+    status, config = call("GET", "/api/agents/%s" % urllib.parse.quote(agent_id, safe=""))
+    step("宿主中已存在该智能体", status == 200 and config.get("name") == target, config)
+
+    status, md = call(
+        "GET",
+        "/api/agents/%s/workspace/files/SOUL.md" % urllib.parse.quote(agent_id, safe=""),
+    )
+    step("人设 SOUL.md 已写入", status == 200 and marker in (md.get("content") or ""), md)
+
+    status, skills = call("GET", "/api/agents/%s/skills" % urllib.parse.quote(agent_id, safe=""))
+    items = skills if isinstance(skills, list) else (skills.get("items", []) if isinstance(skills, dict) else [])
+    names = {str(item.get("name")): bool(item.get("enabled")) for item in items if isinstance(item, dict)}
+    step("捆绑技能已安装并启用", status == 200 and names.get(skill) is True, skills)
+
+    status, ledger = call("GET", "/api/offline-market/agents/installed")
+    entries = ledger.get("items", []) if isinstance(ledger, dict) else []
+    step(
+        "本机安装账本已登记",
+        status == 200 and any(item.get("agent_id") == agent_id for item in entries),
+        ledger,
+    )
+
+    status, removed = call(
+        "POST",
+        "/api/offline-market/agents/%s/uninstall" % urllib.parse.quote(agent_id, safe=""),
+    )
+    uninstall_ok = step("卸载接口成功", status == 200, removed)
+
+    status, gone = call("GET", "/api/agents/%s" % urllib.parse.quote(agent_id, safe=""))
+    step("宿主中已移除该智能体", status == 404, {"status": status, "body": gone})
+
+    workspace = removed.get("workspace_kept") if isinstance(removed, dict) else None
+    if not workspace and isinstance(result, dict):
+        workspace = result.get("workspace_dir")
+    if workspace:
+        path = Path(workspace)
+        if uninstall_ok and "workspaces" in path.parts and path.name == agent_id and path.is_dir():
+            shutil.rmtree(path, ignore_errors=True)
+            step("e2e 工作区清理", True, "已删除" if not path.exists() else f"清理失败：{workspace}")
+        else:
+            step("e2e 工作区清理", True, f"保留：{workspace}")
+except Exception as exc:
+    step("探针异常", False, repr(exc))
+
+print(
+    "__AGENT_E2E__"
+    + json.dumps(
+        {
+            "ok": all(item["ok"] for item in steps),
+            "agent_id": agent_id,
+            "steps": steps,
+        },
+        ensure_ascii=False,
+    )
+)
+'''
+
+
+def phase_c(container: str, market_url: str, tenant: str) -> bool:
+    print("\n[C] Docker runtime 智能体安装/卸载")
+    market = market_url.rstrip("/")
+    suffix = secrets.token_hex(3)
+    slug = f"e2e-agent-{suffix}"
+    version = f"0.1.{int(time.time()) % 100000}"
+    target = f"E2E Agent {suffix}"
+    skill = f"{slug}-skill"
+    marker = f"e2e-soul-{suffix}"
+    skill_md = (
+        "---\n"
+        f"name: {skill}\n"
+        "description: e2e agent skill\n"
+        "---\n\n# e2e\n"
+    )
+    manifest = {
+        "schema": 1,
+        "name": target,
+        "description": "e2e agent installed through the plugin",
+        "language": "zh",
+        "profile": {
+            "thinking_level": "inherit",
+            "plan_enabled": False,
+            "disabled_tools": [],
+        },
+        "md_files": ["SOUL.md", "AGENTS.md"],
+        "skills": [skill],
+    }
+    files = {
+        "manifest.json": json.dumps(manifest, ensure_ascii=False),
+        "SOUL.md": f"# {marker}\n",
+        "AGENTS.md": "# e2e agent\n",
+        f"skills/{skill}/SKILL.md": skill_md,
+        f"skills/{skill}/scripts/run.py": "print('e2e')\n",
+    }
+    status, body, _ = http(
+        "POST",
+        f"{market}/api/v1/agents",
+        {
+            "slug": slug,
+            "version": version,
+            "visibility": "public",
+            "files": files,
+        },
+        {"x-tenant-id": tenant},
+    )
+    if not check(status == 201, "发布临时智能体", str(body)):
+        return False
+
+    args = json.dumps(
+        {
+            "slug": slug,
+            "version": version,
+            "target_name": target,
+            "marker": marker,
+            "skill": skill,
+        },
+        ensure_ascii=False,
+    )
+    ok = True
+    try:
+        completed = run_python(container, AGENT_PROBE, args, timeout=420)
+        output = (completed.stdout or "") + (completed.stderr or "")
+        result = parse_result(output, "__AGENT_E2E__")
+        if result is None:
+            return check(False, "容器内探针输出", output[-1200:] or "无输出")
+        for item in result.get("steps") or []:
+            ok = check(
+                bool(item.get("ok")),
+                f"智能体：{item.get('name') or '未命名步骤'}",
+                "" if item.get("ok") else str(item.get("detail") or ""),
+            ) and ok
+        print(f"        agent_id={result.get('agent_id') or '-'} container={container}")
+    except Exception as exc:  # noqa: BLE001
+        ok = check(False, f"docker exec {container} 内执行探针", str(exc)) and ok
+    finally:
+        status, body, _ = http(
+            "POST",
+            f"{market}/api/v1/agents/{slug}/withdraw",
+            {"reason": "e2e cleanup"},
+            {"x-tenant-id": tenant},
+        )
+        ok = check(status == 200, "撤回临时智能体", str(body)) and ok
+    return ok
+
+
 def main() -> int:
-    parser = argparse.ArgumentParser(description="offline skill market e2e")
+    parser = argparse.ArgumentParser(description="offline market e2e (skills + agents)")
     parser.add_argument("--binary", help="后端可执行文件（phase A）")
     parser.add_argument("--app-url", help="已运行的 QwenPaw 控制台（phase B）")
-    parser.add_argument("--market-url", help="市场后端地址（phase B），默认同 --app-url 的部署值")
-    parser.add_argument("--tenant", default="e2e-tenant", help="phase B 使用的租户 id")
+    parser.add_argument("--market-url", help="市场后端地址（phase B/C）")
+    parser.add_argument("--tenant", default="e2e-tenant", help="phase B/C 使用的租户 id")
     parser.add_argument("--admin", default="admin", help="市场管理员用户名")
     parser.add_argument("--admin-password", default=os.environ.get("ADMIN_PASSWORD", ""))
+    parser.add_argument(
+        "--runtime-container",
+        help="Docker 管理的 tenant runtime 容器名（phase C；需要 docker 权限）",
+    )
     parser.add_argument("--skip-a", action="store_true")
     parser.add_argument("--skip-b", action="store_true")
+    parser.add_argument("--skip-c", action="store_true")
     args = parser.parse_args()
 
     ok = True
@@ -429,6 +656,18 @@ def main() -> int:
                     args.tenant,
                     (args.market_url or "").rstrip("/"),
                     (args.admin, args.admin_password or "e2e-password"),
+                )
+        if not args.skip_c:
+            if not args.runtime_container:
+                print("\n[C] 跳过（未提供 --runtime-container）")
+            elif not args.market_url:
+                print("\n[C] 缺少 --market-url，无法发布临时智能体")
+                ok = False
+            else:
+                ok &= phase_c(
+                    args.runtime_container,
+                    args.market_url.rstrip("/"),
+                    args.tenant,
                 )
     finally:
         shutil.rmtree(workdir, ignore_errors=True)

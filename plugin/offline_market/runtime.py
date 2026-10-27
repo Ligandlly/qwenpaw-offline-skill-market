@@ -60,6 +60,14 @@ def _first(*values: str | None) -> str | None:
     return None
 
 
+def _float_env(name: str, default: float) -> float:
+    try:
+        value = float(os.environ.get(name, ""))
+    except ValueError:
+        return default
+    return value if value > 0 else default
+
+
 def default_config_path() -> Path:
     """Where QwenPaw keeps config.json, without importing qwenpaw."""
     env = os.environ.get("QWENPAW_CONFIG_PATH")
@@ -85,14 +93,14 @@ class ScanGate:
             return (
                 f"技能市场已暂停分发：读不到 QwenPaw 扫描配置（{self.detail}）。"
                 "无法确认扫描处于开启状态，因此本市场拒绝服务。"
-                "修复：为该 runtime 设置 QWENPAW_SKILL_SCAN_MODE=block 后重启。"
+                "修复：把该 runtime 的 security.skill_scanner.mode 设为 block 或 warn 后重启。"
             )
         return (
             "技能市场已暂停分发：QwenPaw 技能扫描被关闭"
             f"（当前 {self.mode}，来源 {self.source}）。"
             "off 模式不扫描技能内容，任何东西都能被装进 runtime，"
             "因此本市场只在 block（拦截）或 warn（扫描后告警）下分发。"
-            "修复：为该 runtime 设置 QWENPAW_SKILL_SCAN_MODE=block 后重启。"
+            "修复：把该 runtime 的 security.skill_scanner.mode 设为 block 或 warn 后重启。"
         )
 
 
@@ -157,6 +165,37 @@ class PluginSettings:
             return float(os.environ.get("OFFLINE_MARKET_TIMEOUT", "10"))
         except ValueError:
             return 10.0
+
+    # ---- host API (this runtime's own QwenPaw app) ----
+    @property
+    def host_api_url(self) -> str | None:
+        """Explicit override; ``resolve_base_url`` handles the rest."""
+        return _first(
+            str(self.plugin_config.get("host_api_url") or ""),
+            os.environ.get("OFFLINE_MARKET_HOST_API_URL"),
+        )
+
+    @property
+    def host_timeout(self) -> float:
+        return _float_env("OFFLINE_MARKET_HOST_TIMEOUT", 30.0)
+
+    @property
+    def install_ready_timeout(self) -> float:
+        return _float_env("OFFLINE_MARKET_INSTALL_TIMEOUT", 60.0)
+
+    @property
+    def install_poll(self) -> float:
+        return _float_env("OFFLINE_MARKET_INSTALL_POLL", 0.5)
+
+    # ---- local state (install ledger) ----
+    @property
+    def working_dir(self) -> Path:
+        raw = _first(os.environ.get("QWENPAW_WORKING_DIR"))
+        return Path(raw).expanduser() if raw else Path.home() / ".qwenpaw"
+
+    @property
+    def state_dir(self) -> Path:
+        return self.working_dir / "offline-market"
 
     def scan_gate(self) -> ScanGate:
         return resolve_scan_gate(self.config_path)

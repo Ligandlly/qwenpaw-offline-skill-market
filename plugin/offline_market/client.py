@@ -171,3 +171,55 @@ class BackendClient:
 
     def restore(self, slug: str) -> Any:
         return self._request("POST", f"/api/v1/skills/{urllib.parse.quote(slug)}/restore")
+
+    # ------------------------------------------------------- agent market ---
+
+    def list_agents(self, query: str = "", page: int = 1, limit: int = 20) -> Any:
+        return self._request(
+            "GET", "/api/v1/agents", query={"q": query, "page": page, "limit": limit}
+        )
+
+    def mine_agents(self) -> Any:
+        return self._request("GET", "/api/v1/agents/mine")
+
+    def agent_status(self, slug: str) -> Any:
+        return self._request("GET", f"/api/v1/agents/{urllib.parse.quote(slug)}/status")
+
+    def fetch_agent_bundle(self, slug: str, version: str) -> Any:
+        return self._request(
+            "GET",
+            f"/api/v1/agents/{urllib.parse.quote(slug)}/"
+            f"{urllib.parse.quote(version or 'latest')}/bundle",
+        )
+
+    def publish_agent(
+        self,
+        *,
+        version: str,
+        files: dict[str, Any],
+        slug: str | None = None,
+        visibility: str = "public",
+        publisher_name: str | None = None,
+    ) -> Any:
+        body: dict[str, Any] = {
+            "version": version,
+            "visibility": visibility,
+            "files": files,
+        }
+        if slug:
+            body["slug"] = slug
+        if publisher_name:
+            body["publisher_name"] = publisher_name
+        return self._request("POST", "/api/v1/agents", body=body)
+
+    def withdraw_agent(self, slug: str, reason: str | None = None) -> Any:
+        return self._request(
+            "POST",
+            f"/api/v1/agents/{urllib.parse.quote(slug)}/withdraw",
+            body={"reason": reason} if reason else {},
+        )
+
+    def restore_agent(self, slug: str) -> Any:
+        return self._request(
+            "POST", f"/api/v1/agents/{urllib.parse.quote(slug)}/restore"
+        )

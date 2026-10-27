@@ -8,11 +8,33 @@ only exists inside this runtime, so every call is proxied from here.
 
 from __future__ import annotations
 
-from typing import Any
+import os
+from typing import Any, NoReturn
 
+from .agents import (
+    AgentError,
+    AgentInstaller,
+    InstalledLedger,
+    bundle_summary,
+    installed_items,
+    snapshot_agent,
+    uninstall_agent,
+)
 from .bundle import BundleError, extract_zip, wire_files
 from .client import BackendClient, BackendError
+from .host import HostClient, HostError, default_local_base_url, resolve_base_url
 from .runtime import PluginSettings
+
+
+def build_installer(settings: PluginSettings, host: HostClient) -> AgentInstaller:
+    """Kept module-level so route tests can substitute the whole state machine."""
+    return AgentInstaller(
+        host,
+        InstalledLedger.from_settings(settings),
+        ready_timeout=settings.install_ready_timeout,
+        poll=settings.install_poll,
+    )
+
 
 
 def _status_for(error: BackendError) -> int:
@@ -35,7 +57,13 @@ def clean_publisher_name(raw: Any) -> str | None:
 
 def build_router(settings: PluginSettings):
     """Import fastapi lazily: importing this module must not require it."""
-    from fastapi import APIRouter, Body, HTTPException
+    from fastapi import APIRouter, Body, HTTPException, Request
+
+    # `from __future__ import annotations` stores "Request" as a string, and
+    # FastAPI resolves annotations from *module* globals. Publish the lazily
+    # imported class there so Request injection works without importing
+    # fastapi at module import time.
+    globals().setdefault("Request", Request)
 
     router = APIRouter()
 
@@ -62,17 +90,81 @@ def build_router(settings: PluginSettings):
                 detail={"code": exc.code, "message": str(exc), "backend_status": exc.status},
             ) from exc
 
+    def host_client(request: Request) -> HostClient:
+        request_base = str(request.base_url).rstrip("/")
+        base = resolve_base_url(settings, request_base_url=request_base)
+        # Only fall back when this base was inferred from the browser. Explicit
+        # config/env must fail loudly instead of being silently overridden.
+        fallback = None
+        if base != resolve_base_url(settings):
+            fallback = default_local_base_url()
+        return HostClient(
+            base,
+            authorization=request.headers.get("authorization"),
+            runtime_token=os.environ.get("QWENPAW_RUNTIME_INTERNAL_TOKEN"),
+            timeout=settings.host_timeout,
+            fallback_base_url=fallback,
+        )
+
+    def raise_agent_http(exc: Exception) -> NoReturn:
+        if isinstance(exc, AgentError):
+            status = exc.status if 400 <= exc.status < 600 else 502
+            detail = exc.as_detail()
+        else:
+            assert isinstance(exc, HostError)
+            status = exc.status if 400 <= exc.status < 600 else 502
+            detail = {"code": exc.code, "message": str(exc)}
+        raise HTTPException(status_code=status, detail=detail)
+
     @router.get("/config")
-    def get_config() -> dict[str, Any]:
+    def get_config(request: Request) -> dict[str, Any]:
         gate = settings.scan_gate()
+        host_api_url: str | None = None
+        host_api_error: str | None = None
+        try:
+            host_api_url = host_client(request).base_url
+        except HostError as exc:
+            host_api_error = str(exc)
         return {
             "market_url": settings.market_url,
             "tenant": settings.tenant,
             "standalone_tenant": settings.standalone_tenant,
             "scan_mode": gate.mode,
             "scan_mode_ok": gate.ok,
+            "host_api_url": host_api_url,
+            "host_api_error": host_api_error,
+            "runtime_token_present": bool(
+                os.environ.get("QWENPAW_RUNTIME_INTERNAL_TOKEN")
+            ),
             "problems": settings.problems(),
             "install_hint": "安装由 QwenPaw 宿主完成：POST /api/skills/hub/install/start",
+        }
+
+    @router.get("/host-health")
+    def host_health(request: Request) -> dict[str, Any]:
+        """Diagnostics for Docker/Hub deployments: can this runtime call itself?
+
+        Always returns 200 so a preflight can print the reason instead of a bare
+        HTTP error; `ok` is the signal.
+        """
+        try:
+            host = host_client(request)
+        except HostError as exc:
+            return {"ok": False, "code": exc.code, "message": str(exc)}
+        try:
+            agents = host.list_agents()
+        except HostError as exc:
+            return {
+                "ok": False,
+                "host_api_url": getattr(host, "base_url", None),
+                "code": exc.code,
+                "message": str(exc),
+            }
+        return {
+            "ok": True,
+            "host_api_url": host.base_url,
+            "agent_count": len(agents),
+            "runtime_token_present": bool(host.runtime_token),
         }
 
     @router.get("/limits")
@@ -183,5 +275,146 @@ def build_router(settings: PluginSettings):
     @router.post("/skills/{slug}/restore")
     def restore(slug: str) -> Any:
         return call(client().restore, slug)
+
+    # ------------------------------------------------------- agent market ---
+
+    @router.get("/agents")
+    def list_agents(q: str = "", page: int = 1, limit: int = 20) -> Any:
+        return call(client().list_agents, q, page, limit)
+
+    @router.get("/agents/mine")
+    def list_my_agents() -> Any:
+        return call(client().mine_agents)
+
+    @router.get("/agents/installed")
+    def installed_agents(request: Request) -> Any:
+        try:
+            host = host_client(request)
+        except HostError as exc:
+            raise_agent_http(exc)
+        backend = client()
+        return {
+            "items": installed_items(
+                host,
+                InstalledLedger.from_settings(settings),
+                backend.agent_status,
+            )
+        }
+
+    @router.get("/agents/{slug}/status")
+    def agent_status(slug: str) -> Any:
+        return call(client().agent_status, slug)
+
+    @router.get("/host-agents")
+    def list_host_agents(request: Request) -> Any:
+        try:
+            agents = host_client(request).list_agents()
+        except HostError as exc:
+            raise_agent_http(exc)
+        items = []
+        for agent in agents:
+            if str(agent.get("backend") or "qwenpaw") != "qwenpaw":
+                continue
+            items.append(
+                {
+                    "id": agent.get("id"),
+                    "name": agent.get("name"),
+                    "description": agent.get("description"),
+                    "workspace_dir": agent.get("workspace_dir"),
+                    "enabled": agent.get("enabled", True),
+                    "startup_status": agent.get("startup_status"),
+                }
+            )
+        return {"items": items}
+
+    @router.post("/agents/publish")
+    def publish_agent(request: Request, payload: dict = Body(...)) -> Any:
+        source = str(payload.get("source_agent_id") or "").strip()
+        version = str(payload.get("version") or "").strip()
+        if not source or not version:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "code": "invalid_publish",
+                    "message": "缺少 source_agent_id 或 version",
+                },
+            )
+        try:
+            snapshot = snapshot_agent(host_client(request), source)
+        except (HostError, AgentError) as exc:
+            raise_agent_http(exc)
+
+        slug = str(payload.get("slug") or "").strip() or None
+        return call(
+            client().publish_agent,
+            slug=slug,
+            version=version,
+            files=snapshot["files"],
+            visibility=str(payload.get("visibility") or "public"),
+            publisher_name=clean_publisher_name(payload.get("publisher_name")),
+        )
+
+    @router.post("/agents/preview")
+    def preview_agent(request: Request, payload: dict = Body(...)) -> Any:
+        source = str(payload.get("source_agent_id") or "").strip()
+        if not source:
+            raise HTTPException(
+                status_code=400,
+                detail={"code": "invalid_preview", "message": "缺少 source_agent_id"},
+            )
+        try:
+            snapshot = snapshot_agent(host_client(request), source)
+        except (HostError, AgentError) as exc:
+            raise_agent_http(exc)
+        manifest = snapshot["manifest"]
+        return {
+            "manifest": manifest,
+            "md_files": manifest.get("md_files") or [],
+            "skills": manifest.get("skills") or [],
+            **bundle_summary(snapshot["files"]),
+        }
+
+    @router.post("/agents/{slug}/withdraw")
+    def withdraw_agent(slug: str, payload: dict | None = Body(default=None)) -> Any:
+        reason = (payload or {}).get("reason")
+        return call(client().withdraw_agent, slug, reason)
+
+    @router.post("/agents/{slug}/restore")
+    def restore_agent(slug: str) -> Any:
+        return call(client().restore_agent, slug)
+
+    @router.post("/agents/{slug}/install")
+    def install_agent(
+        slug: str,
+        request: Request,
+        payload: dict | None = Body(default=None),
+    ) -> Any:
+        body = payload or {}
+        version = str(body.get("version") or "latest").strip() or "latest"
+        target = body.get("target_name")
+        target_name = (
+            str(target).strip()[:128]
+            if isinstance(target, str) and target.strip()
+            else None
+        )
+        bundle = call(client().fetch_agent_bundle, slug, version)
+        try:
+            installer = build_installer(settings, host_client(request))
+            return installer.install(
+                slug=slug, bundle=bundle, target_name=target_name
+            )
+        except (HostError, AgentError) as exc:
+            raise_agent_http(exc)
+
+    @router.post("/agents/{agent_id}/uninstall")
+    def uninstall(agent_id: str, request: Request) -> Any:
+        try:
+            return uninstall_agent(
+                host_client(request),
+                InstalledLedger.from_settings(settings),
+                agent_id,
+            )
+        except (HostError, AgentError) as exc:
+            raise_agent_http(exc)
 
     return router

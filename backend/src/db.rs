@@ -48,9 +48,38 @@ CREATE TABLE IF NOT EXISTS skill_versions (
     PRIMARY KEY (slug, version)
 );
 
+CREATE TABLE IF NOT EXISTS agents (
+    slug             TEXT PRIMARY KEY,
+    name             TEXT NOT NULL,
+    description      TEXT NOT NULL DEFAULT '',
+    owner_tenant     TEXT NOT NULL,
+    visibility       TEXT NOT NULL CHECK (visibility IN ('public','tenant')),
+    latest_version   TEXT,
+    created_at       INTEGER NOT NULL,
+    withdrawn_at     INTEGER,
+    withdrawn_by     TEXT,
+    takedown_at      INTEGER,
+    takedown_by      TEXT,
+    takedown_reason  TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_agents_owner ON agents(owner_tenant);
+
+CREATE TABLE IF NOT EXISTS agent_versions (
+    slug        TEXT NOT NULL REFERENCES agents(slug) ON DELETE CASCADE,
+    version     TEXT NOT NULL,
+    sha256      TEXT NOT NULL,
+    size_bytes  INTEGER NOT NULL,
+    file_count  INTEGER NOT NULL,
+    skill_count INTEGER NOT NULL,
+    bundle_json TEXT NOT NULL,
+    created_at  INTEGER NOT NULL,
+    PRIMARY KEY (slug, version)
+);
+
 CREATE TABLE IF NOT EXISTS audit_log (
     id      INTEGER PRIMARY KEY AUTOINCREMENT,
     at      INTEGER NOT NULL,
+    kind    TEXT NOT NULL DEFAULT 'skill',
     actor   TEXT NOT NULL,
     action  TEXT NOT NULL,
     slug    TEXT,
@@ -90,6 +119,18 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         conn.execute("ALTER TABLE tenants ADD COLUMN display_name TEXT", [])?;
         tracing::info!("schema: tenants.display_name added");
     }
+
+    let audit_columns: Vec<String> = conn
+        .prepare("PRAGMA table_info(audit_log)")?
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<rusqlite::Result<_>>()?;
+    if !audit_columns.iter().any(|name| name == "kind") {
+        conn.execute(
+            "ALTER TABLE audit_log ADD COLUMN kind TEXT NOT NULL DEFAULT 'skill'",
+            [],
+        )?;
+        tracing::info!("schema: audit_log.kind added");
+    }
     Ok(())
 }
 
@@ -108,13 +149,28 @@ pub fn audit(
     version: Option<&str>,
     detail: Option<&str>,
 ) -> rusqlite::Result<()> {
+    audit_kind(conn, "skill", actor, action, slug, version, detail)
+}
+
+/// Same audit trail, tagged so the admin UI can tell skills from agents.
+pub fn audit_kind(
+    conn: &Connection,
+    kind: &str,
+    actor: &str,
+    action: &str,
+    slug: Option<&str>,
+    version: Option<&str>,
+    detail: Option<&str>,
+) -> rusqlite::Result<()> {
     conn.execute(
-        "INSERT INTO audit_log (at, actor, action, slug, version, detail) VALUES (?1,?2,?3,?4,?5,?6)",
-        rusqlite::params![now(), actor, action, slug, version, detail],
+        "INSERT INTO audit_log (at, kind, actor, action, slug, version, detail)
+         VALUES (?1,?2,?3,?4,?5,?6,?7)",
+        rusqlite::params![now(), kind, actor, action, slug, version, detail],
     )?;
     let slug = slug.unwrap_or("-");
     let version = version.unwrap_or("-");
     tracing::debug!(
+        kind = %kind,
         actor = %actor,
         action = %action,
         slug = %slug,

@@ -24,13 +24,13 @@
 | --- | --- |
 | 下载链路 | 插件注册 `MarketSpec`，宿主原生 Skills 页 + 自写侧边栏页**双入口** |
 | 安装实现 | 前端只调宿主 `/api/skills/hub/install/start`，扫描/校验/可取消全归宿主，自建管线一步不写 |
-| **扫描闸门（实测新增，最重要）** | 宿主扫描器**默认 `warn`：CRITICAL 也放行并启用**。市场必须强制 `QWENPAW_SKILL_SCAN_MODE=block`；插件 `available()` 检测不到 `block` 就返回 `(False, reason)` 拒绝服务（fail-closed） |
+| **扫描闸门（实测新增，最重要）** | 宿主扫描器**默认 `warn`：CRITICAL 也放行并启用**。市场要求扫描开启：`block` 推荐，`warn` 允许；插件 `available()` 在 `off` 或读不到 config 时返回 `(False, reason)` 拒绝服务（fail-closed） |
 | 发布入口 | 租户 console 侧边栏「技能市场」页，插件自带 HTTP 路由代发 |
 | 发布链路的唯一形态 | 浏览器 → 插件路由 → 后端。**不能**让浏览器直连后端：租户身份只存在于 runtime 环境变量，交给浏览器等于交给用户随便改 |
 | 管理后台 | 后端自带独立 Web 后台，管理员独立登录；首个账号来自 `ADMIN_USER`/`ADMIN_PASSWORD` 环境变量 |
 | 租户身份 | 信任 `QWENPAW_TENANT_ID` + 内网隔离；后端首次见到新 tenant 自动 upsert |
 | 审核 | 本阶段不做；预留 `status` 字段，后续接智能体 + 人工协同审核 |
-| 文件类型准入 | **不限制任何类型**，市场侧不拦、不提示、不标记（但安装侧必须开 `block`，见上） |
+| 文件类型准入 | **不限制任何类型**，市场侧不拦、不提示、不标记（但安装侧必须开启扫描：`block` 推荐，`warn` 允许） |
 | 实际闸门 | 只剩三条：单包 2 MB / 文件 ≤ 100 / 单文件 ≤ 256 KB；路径规则（拒 `..`、绝对路径、符号链接）；必须含 `SKILL.md` |
 | 限额配置 | **仅环境变量**，改限额 = 重启后端容器 |
 | 下载鉴权 | 服务端按 tenant 校验：公开包任意租户可下，私有包仅属主租户，否则 403。不用 capability URL |
@@ -90,31 +90,31 @@
 ## 4. 里程碑
 
 - **M0** 四个 spike 全绿（任一红则回方案层）
-- **M1 后端** —— **已完成**（`backend/`，Rust + axum + rusqlite，20 个测试全绿）
+- **M1 后端** —— **已完成**（`backend/`，Rust + axum + rusqlite，20 个测试全绿；智能体市场加入后 47 个）
   - 已交付：schema、发布/列表/下载/状态、闸门、管理员登录、下架/撤回/恢复、审计、`/api/v1/limits`
   - 额外发现：宿主`validate_skill_content` 要求 `SKILL.md` frontmatter 有非空 `name`+`description`，缺失时**发布成功但安装失败** → 已前置到后端闸门
   - 已实测完整链路：t-a 发布 → tenant-b 的 QwenPaw 搜到 → 宿主安装成功（`installed_from: offline-market`，文件落地）→ 管理员下架 → 搜索消失 + 重装 `410 Gone`；私有包跨租户 `403`
 - **M2 插件** —— **已完成**（`plugin/`，Python + stdlib client，28 个测试全绿）
   - 已交付：`MarketProvider` + `MarketInstallProvider`（search / matches_url / fetch_bundle / available）、`/api/offline-market/*` 路由（发布、我的、撤回、恢复、状态、限额、config）、`OFFLINE_MARKET_URL` 配置
-  - 关键设计：`available()` 非阻塞 + 扫描闸门 fail-closed（非 `block` 则拒绝服务并给出修复指引）
+  - 关键设计：`available()` 非阻塞 + 扫描闸门 fail-closed（`off`/读不到 config 则拒绝服务并给出修复指引）
   - 已实测：真机安装本插件 → 宿主搜到并安装 tenant-a 的包 → tenant-b 通过插件路由发布私有包 → tenant-a 不可见/403 → 去掉 `block` 后 provider `available:false`
 - **M3 前端** —— **已完成并通过浏览器端到端验证**（`plugin/frontend/market.js`，无构建步骤）
-  - 侧边栏「技能市场（内网）」，`primary.agentScoped`、紧跟内置 `core.marketplace`
+  - 侧边栏「内网市场」（技能页签），`primary.agentScoped`、紧跟内置 `core.marketplace`
   - 四个页签：市场（搜索/表格/安装+取消）、发布（zip 压缩包上传+限额预检）、我的发布（撤回/恢复）、已安装（市场状态徽标）
   - 验证脚本 `spikes/m3_verify.py`：菜单/四个页签/UI 安装到完成/UI 发布/我的发布/管理员下架后「已安装」显示已下架，**0 console & page error**
   - 新发现（已修）：宿主技能列表 `source` 恒为 `customized`、`installed_from` 只在详情里、安装目录名是展示名而非 slug → 新增 `/api/v1/skills/lookup`
-- **M4** 离线 e2e + docker-compose / 裸二进制部署包 + 运维文档（含 `QWENPAW_SKILL_SCAN_MODE=block` 强制项）
+- **M4** 离线 e2e + docker-compose / 裸二进制部署包 + 运维文档（含扫描模式：`block` 推荐，`warn` 允许）—— **已完成（智能体 Docker phase C 需在有 docker 权限的宿主机执行）**
 
 ## 5. 风险表（已签字接受）
 
 | 风险 | 状态 |
 | --- | --- |
-| **不限制文件类型 + 不做审核 = 市场可分发 `.so`/`.exe`/加密脚本，且不提示、不标记。** 宿主 `skill_scanner` 扫的是 skill 危险指令语义，对二进制基本无感 | **接受（静默全放）**，但**前提是安装侧强制 `block`**（S5）。否则这条从"有风险"变成"无防线"：实测默认配置下 CRITICAL 包被扫描、告警、然后照样装好并启用。兜底措施：插件 `available()` 未检测到 `block` 就拒绝服务 |
+| **不限制文件类型 + 不做审核 = 市场可分发 `.so`/`.exe`/加密脚本，且不提示、不标记。** 宿主 `skill_scanner` 扫的是 skill 危险指令语义，对二进制基本无感 | **接受（静默全放）**，前提是安装侧开启扫描。`block` 会拦下 CRITICAL，`warn`（本轮明确允许）只告警后照装；兜底措施：插件 `available()` 在 `off`/读不到 config 时拒绝服务 |
 | 无远程吊销 → 下架治不了已落地副本，`auto_update` 拉不到即失败 | 接受。运维文档写清紧急处置：人工进租户 runtime 删目录 |
 | `X-Tenant-Id` 可被运行时内任意代码读取伪造，后端无法区分 | 接受（内网隔离兜底） |
 | 限额只能靠环境变量，调整必须重启后端 | 接受 |
 | 不做审核 → 后续补审核时需对已上架内容做一次性回溯 | 接受，排入后续工作 |
-| 扫描模式可被运维改回 `warn`（环境变量优先级最高，但配置随时可改） | 靠插件 `available()` 自查 + 部署文档强制项；每租户 runtime 都要带上该环境变量 |
+| 扫描模式为 `warn` 时 CRITICAL 只告警不拦（本轮允许 `warn`） | 接受；部署文档说明 `block` 才是拦截档，插件仍拒绝 `off` |
 | QwenPaw 升 SDK major 会导致 `plugin.json` 被拒 | 版本钉 2.2.2，升级前跑 `plugins.check` |
 | Rust 与 Python 生态割裂，契约靠文档维持 | 插件 repo 内存 OpenAPI 契约 + 双 repo 契约测试 |
 
@@ -124,3 +124,21 @@
 2. 私有包被下架时，属主是否仍可下载（建议：可以，属主不受影响）。
 3. 管理员是否也是租户之一（若是，管理员 console 是否也出现市场入口）。
 4. `SKILL.md` frontmatter 的最小校验（name / description 长度、必填字段）。
+
+## 7. 智能体市场（分支 `feat/agent-market`，M1 后端已完成）
+
+在技能市场之上新增独立的 **agent** 实体；详细契约见
+[`docs/AGENT_MARKET.md`](docs/AGENT_MARKET.md)。
+
+| 议题 | 决定 |
+| --- | --- |
+| 包内容 | 人设（`SOUL/PROFILE/AGENTS/HEARTBEAT/BOOTSTRAP.md`）+ 安全配置子集 + **捆绑技能** |
+| 不打包 | 会话/记忆/jobs/media、模型、渠道、MCP、邮箱、凭据、`approval_level` |
+| 安装链路 | 浏览器 → 插件路由 → **宿主 HTTP API**（创建 agent、写 MD、技能 zip 上传） |
+| 回滚 | 插件负责；失败 `DELETE /api/agents/{id}`，工作区由宿主保留并在页面提示路径 |
+| 扫描 | 技能仍走宿主 `skills/upload` → `scan_skill_dir_or_raise`；插件继续拒绝 `off` |
+| 配置降权防线 | 白名单字段；工具只能关闭不能开启；嵌套 `tools` 不整体提交 |
+| 命名空间 | agent 与 skill 独立表、独立 slug；审计共用 `audit_log`，新增 `kind` |
+| 额度 | **本轮不启用**；后续再加 `MARKET_MAX_AGENT_*`，见设计文档 §3.4 |
+| 安全 | **本轮后置**；只保留结构校验与宿主既有技能扫描链路 |
+| 本轮范围 | **M1–M4 已落地**（MVP）；安全加固与额度后置 |

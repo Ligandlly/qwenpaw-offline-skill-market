@@ -158,8 +158,9 @@ python3 deploy/scripts/enforce-scan-mode.py --runtimes-dir <hub runtimes 目录>
 
 脚本会写 `security.skill_scanner.mode = "block"`，原文件备份为 `config.json.bak`。
 
-**不想要 `warn`**：`block` 才会让安装失败且磁盘无残留，`warn` 只是扫出
-CRITICAL、记一条日志、然后**照常安装并启用**。插件两者都接受，但推荐 `block`。
+`block` 和 `warn` 都允许（`preflight.py` 也只拒绝 `off`）。区别是 `warn` 扫出
+CRITICAL 后只记一条日志，然后**照常安装并启用**；想真正拦住恶意包就用 `block`，
+上面的脚本写的就是 `block`。
 
 **只有 `off` 会被插件拒绝**：`off` 不扫任何内容，插件在这种情况下会拒绝服务
 （`available:false` + 中文原因），所以漏配的表现是"技能市场不可用"，
@@ -247,6 +248,9 @@ Docker Desktop 把发布端口只挂在 `127.0.0.1` 和网桥地址上；**宿�
    ```bash
    docker network connect <hub 网络名> offline-market
    ```
+   > **QwenPaw Hub 的 Docker runtime 例外**：Hub 建的网络显式设置
+   > `com.docker.network.bridge.enable_icc=false`，同网络的容器之间不能互访，
+   > 服务名/容器 IP 都不通。Hub 管理的 runtime 请用 §2.6 的宿主机网桥网关方案。
    compose 里长期化（`<hub 网络名>` 是 hub 自己 compose 建的网络）：
    ```yaml
    networks:
@@ -259,8 +263,109 @@ Docker Desktop 把发布端口只挂在 `127.0.0.1` 和网桥地址上；**宿�
 
 宿主机自己访问后端（管理员调 `/admin/api/*`）：用 `http://127.0.0.1:8080`。
 
-改完地址后按 §2.4 的顺序走（后端改 env → 重建容器 → runtime 侧改地址 → 重启 runtime），
+改用地址后按 §2.4 的顺序走（后端改 env → 重建容器 → runtime 侧改地址 → 重启 runtime），
 并用 preflight 从**容器内部**复验一次（§3 的 `--runtime-container`）。
+
+---
+
+### 2.6 QwenPaw Hub 用 Docker 管理 runtime（M4）
+
+Hub 的 Docker provisioner 把每个租户 runtime 跑在独立容器里：
+
+- 容器名：`qwenpaw-hub-<hub实例>-<runtime_id>`。按 label 查：
+  ```bash
+  docker ps --filter label=io.qwenpaw.hub.runtime-id=<runtime_id> --format '{{.Names}}'
+  ```
+- 容器内 8088 映射到宿主机 `127.0.0.1:<随机端口>`；**插件不通过这个端口工作**。
+- runtime 容器内默认有 `QWENPAW_PORT=8088`、`QWENPAW_RUNTIME_INTERNAL_TOKEN`、
+  `QWENPAW_TENANT_ID`、`QWENPAW_WORKING_DIR=/workspace`（Hub user profile 可配置）。
+
+#### 宿主 API：插件自己调自己
+
+智能体安装的前提是插件能在 runtime 内部调宿主 API。Docker runtime 里：
+
+- 插件自动用 `http://127.0.0.1:${QWENPAW_PORT:-8088}`，
+  并带 `X-QwenPaw-Runtime-Token: $QWENPAW_RUNTIME_INTERNAL_TOKEN`。
+- **不需要**配 `QWENPAW_RUNTIME_API_URL`（Docker provisioner 不注入它）；
+  不要把它手工指到宿主机映射端口，否则会绕过 runtime 边界或直接不通。
+- 认证：runtime 默认开 `QWENPAW_AUTH_ENABLED=true`；插件本机调用走 loopback
+  （默认 `security.allow_no_auth_hosts` 含 `127.0.0.1`），同时有 runtime token。
+  如果运维删掉了 loopback 白名单，插件转发的浏览器 Bearer 必须能被 runtime 接受，
+  否则智能体安装会 401。
+
+容器内自检（不依赖 curl）：
+
+```bash
+docker exec <容器名> python3 -c '
+import json,os,urllib.request
+base="http://127.0.0.1:"+os.environ.get("QWENPAW_PORT","8088")
+h={"x-qwenpaw-runtime-token":os.environ.get("QWENPAW_RUNTIME_INTERNAL_TOKEN","")}
+for p in ("/api/offline-market/config","/api/offline-market/host-health"):
+    r=urllib.request.Request(base+p,headers=h)
+    print(p, urllib.request.urlopen(r,timeout=10).read().decode())
+'
+```
+
+`/api/offline-market/config` 会显示解析到的 `host_api_url` 和是否带 runtime token；
+`/host-health` 会真正调一次 `GET /api/agents`，返回 `agent_count`。
+
+#### 市场后端地址：不能用同网络容器名
+
+Hub 创建的网络 `qwenpaw-hub-<实例>` 显式关闭容器互访
+（`com.docker.network.bridge.enable_icc=false`）。因此 §2.5 的
+「把后端接进同一个网络、用容器名」在 Hub runtime 上**不成立**。
+
+用宿主机网桥网关（Linux）或 Docker Desktop 的 `host.docker.internal`：
+
+```bash
+docker network ls --filter name=qwenpaw-hub
+gateway=$(docker network inspect qwenpaw-hub-<实例> \
+  -f '{{(index .IPAM.Config 0).Gateway}}')
+echo "$gateway"     # 例 172.18.0.1
+
+# 后端必须监听 0.0.0.0（默认就是），然后两处地址逐字符一致：
+#   后端 MARKET_PUBLIC_URL = http://172.18.0.1:8080
+#   runtime OFFLINE_MARKET_URL = http://172.18.0.1:8080
+```
+
+容器内验证：
+
+```bash
+docker exec <容器名> python3 -c \
+  'import urllib.request;print(urllib.request.urlopen("http://172.18.0.1:8080/health",timeout=8).status)'
+```
+
+Docker Desktop（macOS/Windows）用 `http://host.docker.internal:8080`；
+Linux 上宿主机默认不解析 `host.docker.internal`，优先用 bridge gateway。
+
+#### 智能体工作区与清理
+
+- 容器内：`$QWENPAW_WORKING_DIR/workspaces/<agent_id>`（默认 `/workspace/workspaces/<id>`）
+- 宿主机（通常）：`<hub runtimes>/<runtime_id>/working/workspaces/<agent_id>`
+- 智能体卸载只摘宿主配置，**不删工作区**。清理：
+  ```bash
+  docker exec <容器名> sh -lc 'rm -rf "$QWENPAW_WORKING_DIR/workspaces/<agent_id>"'
+  # 或停容器后在宿主机删除 working/workspaces/<agent_id>
+  ```
+- 插件安装账本：容器内 `$QWENPAW_WORKING_DIR/offline-market/installed-agents.json`。
+
+#### 验收命令
+
+```bash
+# phase C：在 runtime 容器内发布→安装→校验→卸载（需要 docker 权限）
+python3 deploy/scripts/e2e.py --skip-a --skip-b \
+    --runtime-container <容器名> \
+    --market-url http://172.18.0.1:8080 --tenant <租户id>
+
+# preflight：容器内后端可达 + 插件 → 宿主 API
+python3 deploy/scripts/preflight.py --market-url http://market.internal:8080 \
+    --public-url http://172.18.0.1:8080 \
+    --runtimes-dir <hub runtimes> \
+    --runtime-container <容器名>
+```
+
+> phase C 会在市场里留下一条**已撤回**的 `e2e-agent-*` 记录（后端没有删除接口），
+> 不会出现在列表里；宿主里的临时智能体和工作区会被清理。
 
 ---
 
@@ -276,15 +381,21 @@ python3 deploy/scripts/preflight.py --market-url http://market.internal:8080 \
     --runtimes-dir <hub runtimes> \
     --app-url http://127.0.0.1:8123 --qwenpaw "$(command -v qwenpaw)"
 
-# runtime 在容器里时，再加这两项（--public-url 是后端的 MARKET_PUBLIC_URL；
-# --runtime-container 让 preflight 进容器里探一次，避免"宿主机通、容器不通"）
+# runtime 在容器里时，再加容器视角的检查（--public-url 是后端的 MARKET_PUBLIC_URL；
+# --runtime-container 让 preflight 进容器里探后端 + 插件→宿主 API）
 python3 deploy/scripts/preflight.py --market-url http://127.0.0.1:8080 \
     --public-url http://host.docker.internal:8080 \
     --runtimes-dir <hub runtimes> --runtime-container <runtime 容器名>
 
+# 技能：宿主安装链路（phase B）
 python3 deploy/scripts/e2e.py --skip-a \
     --app-url http://127.0.0.1:8123 --market-url http://market.internal:8080 \
     --tenant <租户id> --admin-password "$ADMIN_PASSWORD"
+
+# 智能体：Docker runtime 容器内安装/卸载（phase C；需要 docker 权限）
+python3 deploy/scripts/e2e.py --skip-a --skip-b \
+    --runtime-container <runtime 容器名> \
+    --market-url http://172.18.0.1:8080 --tenant <租户id>
 ```
 
 详细标准见 `docs/ACCEPTANCE.md`。
@@ -299,12 +410,15 @@ python3 deploy/scripts/e2e.py --skip-a \
 
 | 任务 | 做法 |
 | --- | --- |
-| 发布技能 | 租户在「技能市场（内网）→ 发布」上传技能 `.zip`（根目录或唯一顶层目录含 `SKILL.md`）；版本不可变，同一 slug 换版本号 |
-| 撤回自己发的 | 我的发布 → 撤回；可恢复 |
-| 管理员下架 | 后端 `POST /admin/api/skills/{slug}/takedown {"reason":"..."}`；整包下架、禁止再分发、属主不能自恢复 |
-| 恢复上架 | `POST /admin/api/skills/{slug}/restore` |
-| 调限额 | 改环境变量后**重启后端**（限额只认 env，这是 PLAN 的既定选择） |
-| 看审计 | `GET /admin/api/audit?limit=200`（只到租户粒度，无按人） |
+| 发布技能 | 租户在「内网市场 → 技能 → 发布」上传技能 `.zip`（根目录或唯一顶层目录含 `SKILL.md`）；版本不可变，同一 slug 换版本号 |
+| 发布智能体 | 租户在「内网市场 → 智能体 → 发布」选择本机 agent → 预览 → 发布；只打包五种白名单 MD + 已启用技能 |
+| 安装/卸载智能体 | 市场页「安装」新建独立 agent；「已安装」卸载只摘配置，工作区保留（清理见 §2.6） |
+| 撤回自己发的 | 技能/智能体「我的发布」→ 撤回；可恢复 |
+| 管理员下架 | 技能 `POST /admin/api/skills/{slug}/takedown`；智能体 `POST /admin/api/agents/{slug}/takedown`；均整包停止分发、属主不能自恢复 |
+| 恢复上架 | 对应 `.../restore` |
+| 调限额 | 技能市场改 `MARKET_MAX_*` 后**重启后端**；智能体市场 MVP 不启用独立额度 |
+| 看审计 | `GET /admin/api/audit?limit=200`；`&kind=agent` 只看智能体 |
+| 容器内诊断 | `docker exec <容器> ...` 调插件 `/api/offline-market/config` 与 `/host-health`（§2.6） |
 | 备份 | 停机或 `sqlite3 market.sqlite3 ".backup /backup/market-$(date +%F).sqlite3"`；包体也存在库里，一个文件就是全部 |
 | 恢复 | 停后端 → 覆盖 sqlite 文件 → 启动；`-wal`/`-shm` 一并清掉 |
 | 升级后端 | 换二进制/镜像，重启；schema 目前是 `CREATE TABLE IF NOT EXISTS`，无迁移步骤 |
@@ -369,6 +483,10 @@ curl -s -H "x-tenant-id: <租户id>" http://<市场地址>:8080/api/v1/skills?li
 | `X-Tenant-Id` 是信任不是认证 | 后端必须只在内网暴露；能访问内网的人可以伪造租户 |
 | 审计只到租户 | 一租户一人的前提下等于到人；多用户租户需要再加身份 |
 | 限额改动需重启 | 环境变量是唯一来源 |
+| 智能体 MVP 无独立额度 | 只受 64 MiB HTTP 请求体限制；后续再加 `MARKET_MAX_AGENT_*` |
+| 智能体卸载保留工作区 | 宿主只摘配置；容器内 `/workspace/workspaces/<id>` 需按 §2.6 手工清理 |
+| Docker Hub 网络禁容器互访 | 市场后端不能用同网络容器名，必须走宿主机网桥网关/`host.docker.internal`（§2.6） |
+| 智能体宿主 API 仅容器内 loopback | 不要手工把 `QWENPAW_RUNTIME_API_URL` 指向宿主机映射端口 |
 | 二进制可发布但不能经 hub 安装 | 市场接受 `docx`/`pptx` 等附件（JSON 用 `{"base64":...}` 传输），但 QwenPaw 2.2.2 的 hub 安装只按文本写盘；含非 UTF-8 文件的技能安装时插件会明确报 `binary_bundle`，不会写出损坏文件 |
 
 ---

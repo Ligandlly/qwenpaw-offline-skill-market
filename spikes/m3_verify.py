@@ -2,11 +2,12 @@
 """M3 end-to-end verification in a real browser (no mocks).
 
 Covers the four tabs and the two write paths:
-  1. sidebar entry: 技能市场（内网）, primary.agentScoped, right after core.marketplace
+  1. sidebar entry: 内网市场, primary.agentScoped, right after core.marketplace
   2. 市场: table renders, 安装 drives the host install task to completion
   3. 发布: upload a skill .zip + publish -> success notice
   4. 我的发布: the new skill appears
   5. 已安装: shows 正常; after an admin takedown it shows 已下架
+  6. 智能体: top-level tab and its four sub-tabs render
 
 Run with backend :8099 and qwenpaw app :8123 up, plugin installed:
     .venv/Scripts/python.exe m3_verify.py
@@ -90,7 +91,7 @@ def main() -> int:
             "found": bool(ours),
             "item": ours[0] if ours else None,
             "ok": bool(ours)
-            and ours[0].get("label") == "技能市场（内网）"
+            and ours[0].get("label") == "内网市场"
             and ours[0].get("location") == "primary.agentScoped",
         }
 
@@ -102,7 +103,7 @@ def main() -> int:
             for label in ["市场", "发布", "我的发布", "已安装"]
         )
         report["steps"]["market_tab"] = {
-            "title": page.get_by_text("技能市场（内网）").first.is_visible(),
+            "title": page.get_by_text("内网市场").first.is_visible(),
             "has_tabs": has_tabs,
             "ok": has_tabs,
         }
@@ -194,6 +195,18 @@ def main() -> int:
         }
         page.screenshot(path=str(SHOTS / "m3-installed.png"), full_page=True)
 
+        # 6) agent market: top-level tab + the shared install warning ----------
+        page.get_by_text("智能体", exact=True).first.click()
+        page.wait_for_timeout(1500)
+        agent_text = page.inner_text("body")
+        report["steps"]["agent_ui"] = {
+            "ok": "智能体安装会在本机新建一个独立智能体" in agent_text,
+            "snippet": agent_text[agent_text.find("智能体") :][:300]
+            if "智能体" in agent_text
+            else agent_text[:300],
+        }
+        page.screenshot(path=str(SHOTS / "m3-agent.png"), full_page=True)
+
         browser.close()
 
     report["page_errors"] = errors
@@ -205,6 +218,7 @@ def main() -> int:
         and report["steps"]["mine"]["ok"]
         and report["steps"]["installed_before_takedown"]["ok"]
         and report["steps"]["installed_after_takedown"]["ok"]
+        and report["steps"]["agent_ui"]["ok"]
         and not errors
         and not console_errors
     )

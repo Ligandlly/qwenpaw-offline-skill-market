@@ -1,9 +1,9 @@
 # offline-market plugin (QwenPaw 2.2.2)
 
-离线技能市场的 QwenPaw 插件。**只做三件事**：让宿主原生 Skills 页认得这个市场、给自己的侧边栏页面提供 HTTP 路由、（M3）渲染那个页面。安装、校验、扫描、落盘全由宿主完成。
+离线市场的 QwenPaw 插件。**只做三件事**：让宿主原生 Skills 页认得这个市场、给自己的侧边栏页面提供 HTTP 路由（技能 + 智能体）、渲染那个页面。安装、校验、扫描、落盘全由宿主完成。
 
 ```bash
-python -m pytest          # 64 个测试，不需要宿主、不需要网络
+python -m pytest          # 98 个测试，不需要宿主、不需要网络
 ```
 
 ## 装机
@@ -55,7 +55,11 @@ qwenpaw plugin list                    # ID: offline-market
 | `QWENPAW_TENANT_ID` | ✅（Hub 托管时自动注入） | 租户身份唯一来源；为空则市场不可用（fail-closed） |
 | `QWENPAW_SKILL_SCAN_MODE` | ✅ 必须是 `block` 或 `warn` | `off` 则本插件拒绝服务，理由见下 |
 | `OFFLINE_MARKET_TENANT` | 仅单机部署 | 显式指定租户，身份退化为配置字符串 |
-| `OFFLINE_MARKET_TIMEOUT` | 可选，默认 10s | 访问后端的超时 |
+| `OFFLINE_MARKET_TIMEOUT` | 可选，默认 10s | 访问**市场后端**的超时 |
+| `OFFLINE_MARKET_HOST_API_URL` | 可选 | 本 runtime 自己的 QwenPaw API origin（默认依次取 `QWENPAW_RUNTIME_API_URL`、`http://127.0.0.1:${QWENPAW_PORT:-8088}`）。明文 HTTP 只允许 loopback / `host.docker.internal` |
+| `OFFLINE_MARKET_HOST_TIMEOUT` | 可选，默认 30s | 调宿主 API 的超时（技能上传另有 120s 下限） |
+| `OFFLINE_MARKET_INSTALL_TIMEOUT` | 可选，默认 60s | 等待新建 agent 工作区就绪的超时 |
+| `OFFLINE_MARKET_INSTALL_POLL` | 可选，默认 0.5s | 就绪轮询间隔 |
 
 ## 扫描闸门：接受 `block` 和 `warn`，只拒绝 `off`
 
@@ -96,8 +100,15 @@ class OfflineMarketProvider:          # MarketProvider + MarketInstallProvider
 
 ## 前端页面（M3）
 
-侧边栏「**技能市场（内网）**」，位置 `primary.agentScoped`、紧跟宿主内置的 `core.marketplace`；
-路由 `/offline-market`。四个页签：
+侧边栏「**内网市场**」，位置 `primary.agentScoped`、紧跟宿主内置的 `core.marketplace`；
+路由 `/offline-market`。页面顶部两个一级页签：
+
+| 一级页签 | 内容 |
+| --- | --- |
+| 技能 | 原有的技能市场四页签（见下表），安装仍走宿主 `POST /api/skills/hub/install/start` |
+| 智能体 | 智能体市场四页签，安装走插件 → 宿主 `POST /api/agents`（见下节） |
+
+技能四页签：
 
 | 页签 | 内容 |
 | --- | --- |
@@ -106,8 +117,18 @@ class OfflineMarketProvider:          # MarketProvider + MarketInstallProvider
 | 我的发布 | 撤回 / 恢复上架；被管理员下架的显示"无法自助恢复" |
 | 已安装 | 从本市场安装的技能及其市场状态：正常 / 已撤回 / 已下架（含原因） |
 
+智能体四页签：
+
+| 页签 | 内容 |
+| --- | --- |
+| 市场 | 搜索 + 表格（描述/可见性/发布者/技能数/版本数）+ 安装弹窗；安装中显示阶段、失败显示 `step` 与回滚/保留工作区 |
+| 发布 | 选择本机 agent →「预览将打包内容」（人设/技能/文件数/大小）→ 发布；版本不可变 |
+| 我的发布 | 撤回 / 恢复上架；被管理员下架的不可自助恢复 |
+| 已安装 | 本机安装账本 + 市场状态；卸载只摘除宿主配置，工作区路径会显示并保留 |
+
 无构建步骤：`frontend/market.js` 是普通 ES module，React/antd 从 `window.QwenPaw.host` 取。
-端到端验证脚本：`spikes/m3_verify.py`（Playwright，覆盖菜单→安装→发布→下架后徽标）。
+端到端验证脚本：`spikes/m3_verify.py`（Playwright，覆盖菜单→技能安装→发布→下架后徽标；
+智能体页签目前只做渲染检查，真实安装 e2e 在 M4 补）。
 
 市场页的「已安装」判定和「已安装」页同源但更省：宿主的 `/skills` 列表只给展示名，
 所以先取一次列表，再**只对市场行里出现的名字**查 `/skills/{name}` 的 `installed_from`
@@ -177,6 +198,55 @@ class OfflineMarketProvider:          # MarketProvider + MarketInstallProvider
 
 安装**不在这里**：页面直接调宿主 `POST /api/skills/hub/install/start`（`provider_key: "offline-market"`, `bundle_url`），然后轮询 `/status/{task_id}`。
 
+## 智能体市场（M2）
+
+除技能市场外，同一插件还提供 **agent 市场**：把本机现成智能体（人设 MD + 安全配置子集 +
+捆绑技能）发布到市场，安装时由插件服务端调宿主 API 创建新 agent。
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| GET | `/api/offline-market/agents?q=&page=&limit=` | 市场列表（代理后端） |
+| GET | `/api/offline-market/agents/mine` | 我的发布 |
+| GET | `/api/offline-market/agents/{slug}/status` | 市场状态 |
+| GET | `/api/offline-market/agents/installed` | 本机安装账本 + 市场状态 |
+| GET | `/api/offline-market/host-health` | 容器内诊断：插件调一次宿主 `GET /api/agents` |
+| GET | `/api/offline-market/host-agents` | 本机可发布的 agent（过滤 `backend=qwenpaw`） |
+| POST | `/api/offline-market/agents/publish` | 从 `source_agent_id` 只读快照并发布 |
+| POST | `/api/offline-market/agents/preview` | 只快照并返回将打包的人设/技能/大小，不发布 |
+| POST | `/api/offline-market/agents/{slug}/withdraw` | 撤回 |
+| POST | `/api/offline-market/agents/{slug}/restore` | 恢复 |
+| POST | `/api/offline-market/agents/{slug}/install` | 安装到本机 |
+| POST | `/api/offline-market/agents/{agent_id}/uninstall` | 卸载（保留工作区） |
+
+`agents/publish` 的 `slug` 可省略：名称能转 ASCII 就按名称推导，否则用稳定的
+`agent-<hash>`；中文名称的智能体可以直接发布和安装。
+
+安装顺序：`POST /api/agents` → 轮询工作区就绪 → 写人设 MD → 上传技能 zip（宿主扫描）→
+应用 `plan` / 关闭指定工具 → 写本地账本。任何一步失败都会 `DELETE /api/agents/{id}` 回滚；
+宿主不删工作区，所以响应会带 `workspace_kept` 路径。
+
+- 账本：`$QWENPAW_WORKING_DIR/offline-market/installed-agents.json`（原子写）。
+  「已安装」页与宿主 `GET /api/agents` 对账，用户手工删掉的 agent 会自动从账本移除。
+- 发布快照只读五种白名单 MD + 已启用技能，**不会**打包 `MEMORY.md`、会话、记忆、
+  模型、渠道、MCP、邮箱、凭据。
+- 卸载只摘除宿主配置，**不删除工作区**；需要清理时按返回的 `workspace_kept` 手工删除。
+- MVP 不启用独立额度；唯一硬上限是 HTTP 请求体 64 MiB。安全加固见
+  [`docs/AGENT_MARKET.md`](../docs/AGENT_MARKET.md) §7（当前后置）。
+
+### Docker 管理的 Hub runtime
+
+插件自动用容器内 `http://127.0.0.1:${QWENPAW_PORT:-8088}` 调宿主 API，并带
+`X-QwenPaw-Runtime-Token`；**不需要** `QWENPAW_RUNTIME_API_URL`。Hub 网络关闭了
+容器互访，市场后端地址必须从容器视角可达（宿主机网桥网关 / `host.docker.internal`）。
+完整说明与验收命令见 [`docs/OPS.md`](../docs/OPS.md) §2.6。
+
+容器内诊断：
+
+```bash
+docker exec <容器> python3 -c '...'   # 或直接跑
+python3 deploy/scripts/preflight.py --market-url ... --runtime-container <容器>
+```
+
 ## 结构
 
 ```
@@ -187,8 +257,10 @@ offline_market/
   client.py                  # stdlib urllib 客户端，transport 可注入
   bundle.py                  # .zip -> {路径: 字节} -> 后端 JSON（文本/base64）：路径/符号链接/大小闸门
   provider.py                # MarketProvider / MarketInstallProvider 实现
+  host.py                    # 本 runtime 的宿主 API 客户端（token 透传、loopback 限制、multipart）
+  agents.py                  # 智能体快照 / 安装状态机 / 回滚 / 本机账本
   routes.py                  # 自用 HTTP 路由（fastapi 延迟导入）
-tests/                       # 64 个测试：闸门、映射、错误透传、传输层异常、路由、解压
+tests/                       # 98 个测试：闸门、映射、错误透传、路由、解压、快照/安装/回滚
 ```
 
 ## 实测链路（本机，backend 8099 + qwenpaw 8123）

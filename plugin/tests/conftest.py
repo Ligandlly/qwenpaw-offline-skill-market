@@ -100,6 +100,7 @@ def env(monkeypatch, tmp_path):
     monkeypatch.setenv("QWENPAW_TENANT_ID", "tenant-a")
     monkeypatch.setenv("QWENPAW_SKILL_SCAN_MODE", "block")
     monkeypatch.setenv("QWENPAW_CONFIG_PATH", str(tmp_path / "config.json"))
+    monkeypatch.setenv("QWENPAW_WORKING_DIR", str(tmp_path / "home"))
     monkeypatch.delenv("OFFLINE_MARKET_TENANT", raising=False)
     monkeypatch.delenv("TENANT_ID", raising=False)
     return monkeypatch

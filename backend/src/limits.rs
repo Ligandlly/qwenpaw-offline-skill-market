@@ -4,7 +4,8 @@
 //! so what is left is structural — it protects the host from disk bombs and
 //! path escapes, and it protects tenants from broken packages. It is NOT a
 //! malware filter: the only malware defence lives on the install side
-//! (`QWENPAW_SKILL_SCAN_MODE=block`, see spikes/s5_scan_mode_gate.py).
+//! (`QWENPAW_SKILL_SCAN_MODE=block` preferred, `warn` accepted; see
+//! spikes/s5_scan_mode_gate.py).
 
 use crate::config::Limits;
 use base64ct::{Base64, Encoding};
@@ -20,7 +21,7 @@ pub struct Reject {
 }
 
 impl Reject {
-    fn new(code: &'static str, message: impl Into<String>) -> Self {
+    pub(crate) fn new(code: &'static str, message: impl Into<String>) -> Self {
         Self {
             code,
             message: message.into(),
@@ -191,7 +192,7 @@ pub fn check_bundle(
     })
 }
 
-fn check_path(path: &str) -> Result<(), Reject> {
+pub(crate) fn check_path(path: &str) -> Result<(), Reject> {
     if path.is_empty() || path.len() > 200 {
         return Err(Reject::new("invalid_path", format!("bad path {:?}", path)));
     }
@@ -235,7 +236,7 @@ fn check_path(path: &str) -> Result<(), Reject> {
 /// ponytail: this is a structural pre-check, not a YAML parser. Anything that
 /// slips through surfaces at install time, where the host does the real
 /// validation and nothing has been distributed yet.
-fn manifest_meta(content: &str) -> Result<(String, String), Reject> {
+pub(crate) fn manifest_meta(content: &str) -> Result<(String, String), Reject> {
     let mut lines = content.lines();
     if lines.next().map(str::trim_end) != Some("---") {
         return Err(Reject::new(

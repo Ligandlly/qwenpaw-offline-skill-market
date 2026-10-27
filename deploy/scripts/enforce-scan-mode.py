@@ -4,8 +4,8 @@
 
 为什么需要这个脚本：QwenPaw 默认 `security.skill_scanner.mode = "warn"`，
 而 warn 模式下 CRITICAL 级别的包**照样安装并启用**（实测，见
-spikes/findings-2.2.2.md 结论 9）。我们的插件在这种情况下会拒绝服务，
-所以部署时必须真的把模式改成 block。
+spikes/findings-2.2.2.md 结论 9）。插件接受 warn，但只告警不拦；想真正
+拦住恶意包就部署成 block，这个脚本负责批量改。
 
 为什么不能只设环境变量：Hub 的两个 provisioner 都用
 `system_environment()`（`src/qwenpaw/utils/runtime_environment.py`）构造

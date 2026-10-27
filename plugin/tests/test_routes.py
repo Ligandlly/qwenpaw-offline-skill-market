@@ -44,6 +44,8 @@ def test_config_endpoint_reports_gate_and_problems(api, env):
     assert body["tenant"] == "tenant-a"
     assert body["scan_mode"] == "block" and body["scan_mode_ok"] is True
     assert body["problems"] == []
+    assert body["host_api_url"].startswith("http://127.0.0.1:")
+    assert body["runtime_token_present"] is False
 
 
 def test_routes_are_unavailable_when_not_configured(api, env):

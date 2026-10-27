@@ -1,11 +1,11 @@
-# QwenPaw 离线技能市场
+# QwenPaw 离线技能与智能体市场
 
 [![backend](https://github.com/Ligandlly/qwenpaw-offline-skill-market/actions/workflows/backend.yml/badge.svg)](https://github.com/Ligandlly/qwenpaw-offline-skill-market/actions/workflows/backend.yml)
 [![backend-image](https://github.com/Ligandlly/qwenpaw-offline-skill-market/actions/workflows/backend-image.yml/badge.svg)](https://github.com/Ligandlly/qwenpaw-offline-skill-market/actions/workflows/backend-image.yml)
 [![plugin](https://github.com/Ligandlly/qwenpaw-offline-skill-market/actions/workflows/plugin.yml/badge.svg)](https://github.com/Ligandlly/qwenpaw-offline-skill-market/actions/workflows/plugin.yml)
 [![plugin-package](https://github.com/Ligandlly/qwenpaw-offline-skill-market/actions/workflows/plugin-package.yml/badge.svg)](https://github.com/Ligandlly/qwenpaw-offline-skill-market/actions/workflows/plugin-package.yml)
 
-给 **QwenPaw 2.2.2** 加一个可完全离线部署的内部技能市场：租户在 Console 里浏览/安装技能，也可以发布自己的技能；Hub 管理员在独立后台下架违规内容。
+给 **QwenPaw 2.2.2** 加一个可完全离线部署的内部市场：租户在 Console 里浏览/安装**技能与智能体**，也可以发布自己的技能/智能体；Hub 管理员在独立后台下架违规内容。
 
 ```
 租户浏览器 ──▶ 租户 runtime（QwenPaw 2.2.2 + 本插件）──▶ 市场后端（Rust + SQLite）
@@ -13,16 +13,16 @@
                      └──── X-Tenant-Id = QWENPAW_TENANT_ID ──┘   管理员浏览器 ──▶ /admin/api
 ```
 
-核心取舍：**安装始终由 QwenPaw 宿主完成**（bundle 校验、`skill_scanner` 扫描、落盘、可取消任务）。本仓库只做"存、发、授权、审计"，不实现第二条安装管线。
+核心取舍：**技能安装始终由 QwenPaw 宿主完成**（bundle 校验、`skill_scanner` 扫描、落盘、可取消任务）；智能体安装由插件在服务端编排宿主 API（创建 agent、写人设、技能 zip 上传、配置），校验、扫描、落盘仍归宿主。本仓库只做"存、发、授权、审计"，不实现第二条技能安装管线。
 
 ## 仓库结构
 
 | 目录 | 内容 |
 | --- | --- |
-| `backend/` | 市场后端：Rust + axum + rusqlite（SQLite bundled），32 个测试 |
-| `plugin/` | QwenPaw 2.2.2 插件：市场 provider + 自用 HTTP 路由 + 侧边栏页面，64 个测试 |
+| `backend/` | 市场后端：Rust + axum + rusqlite（SQLite bundled），47 个测试 |
+| `plugin/` | QwenPaw 2.2.2 插件：技能/智能体市场路由 + 侧边栏页面，98 个测试 |
 | `deploy/` | docker-compose / systemd / 离线打包 / preflight / 端到端验收脚本 |
-| `docs/` | `OPS.md` 部署运维手册、`ACCEPTANCE.md` 验收标准 |
+| `docs/` | `OPS.md` 部署运维手册、`ACCEPTANCE.md` 验收标准、`AGENT_MARKET.md` 智能体市场设计与契约 |
 | `spikes/` | M0 阶段对 2.2.2 的实证结论（11 条），以及浏览器验证脚本 |
 | `PLAN.md` | 设计定案、里程碑、风险表（含明确接受的取舍） |
 
@@ -53,7 +53,7 @@ python3 deploy/scripts/build-plugin-zip.py      # 只要插件 -> dist/offline-m
 ## 部署前必须知道的两件事
 
 1. **每个租户 runtime 的技能扫描不能是 `off`**
-   `block`（拦截）和 `warn`（扫描、告警、照装）插件都接受；`off` 什么都不扫，插件会拒绝服务。
+   `block`（拦截）和 `warn`（扫描、告警、照装）插件都接受，`preflight.py` 也按这个口径放行；`off` 什么都不扫，插件会拒绝服务。
    想拦住恶意包就得多花一步：`warn` 下实测一个含 `exec(input())` 的包被扫出 CRITICAL、记日志、然后**照常安装并启用**，只有 `block` 才会让安装失败且磁盘无残留。
    `QWENPAW_SKILL_SCAN_MODE` 无法从 Hub 注入（`system_environment()` 只继承 `LANG/LC_*`，credentials 又被 `QWENPAW_` 前缀过滤），必须落到 runtime 的 `config.json`：
    ```bash
@@ -92,7 +92,10 @@ python3 deploy/scripts/build-plugin-zip.py      # 只要插件 -> dist/offline-m
 python3 deploy/scripts/e2e.py --binary dist/offline-market-*/bin/offline-market-backend   # 后端 20 项
 python3 deploy/scripts/e2e.py --skip-a --app-url http://127.0.0.1:8123 \
         --market-url http://market.internal:8080 --tenant <租户>                            # 宿主 6 项
-python3 spikes/m3_verify.py                                                               # 浏览器 8 项
+python3 deploy/scripts/e2e.py --skip-a --skip-b \
+        --runtime-container <runtime 容器> --market-url http://<宿主机网关>:8080 \
+        --tenant <租户>                                                                    # Docker 智能体
+python3 spikes/m3_verify.py                                                               # 浏览器 9 项
 python3 deploy/scripts/preflight.py --market-url ... --runtimes-dir ... --app-url ...      # 部署自检
 ```
 
@@ -101,9 +104,10 @@ python3 deploy/scripts/preflight.py --market-url ... --runtimes-dir ... --app-ur
 ## 已知边界（设计取舍，不是缺陷）
 
 - 无人工审核、不限文件类型：市场可分发任意内容，唯一自动防线是安装侧扫描（`warn` 只告警不拦，`off` 会被插件拒服务）。
-- 无远程吊销：下架只停止分发，已安装副本需人工清理。
+- 无远程吊销：下架只停止分发，已安装副本需人工清理；智能体卸载还保留工作区。
 - `X-Tenant-Id` 是内网信任而非认证；审计只到租户粒度（前提是一租户一人）。
-- 限额只认环境变量，调整需重启后端。
+- 限额只认环境变量，调整需重启后端；智能体市场 MVP 暂不启用独立额度。
+- QwenPaw Hub 的 Docker 网络关闭容器互访，市场地址必须走宿主机网桥网关/内网 IP（见 `docs/OPS.md` §2.6）。
 
 ## CI 与发版
 
@@ -111,7 +115,7 @@ python3 deploy/scripts/preflight.py --market-url ... --runtimes-dir ... --app-ur
 | --- | --- | --- |
 | `backend.yml` | 改动 `backend/**`、推 tag `v*`、手动 | `cargo fmt --check` → `clippy -D warnings` → `cargo test --all-targets` → release 构建 → 上传 artifact；**推 `v*` tag 时自动建 Release 并附二进制 tarball + sha256** |
 | `backend-image.yml` | 改动 `backend/**`、推 tag `v*`、手动 | 跑一遍测试 → 构建后端镜像（linux/amd64）→ **推 ghcr.io** → 导出 `docker save` tarball 上传 artifact（tag 时也挂到 Release）；PR 只构建不推送 |
-| `plugin.yml` | 改动 `plugin/**`、手动 | `pytest`（64 项，不装 QwenPaw、不联网）+ `compileall` |
+| `plugin.yml` | 改动 `plugin/**`、手动 | `pytest`（98 项，不装 QwenPaw、不联网）+ `compileall` |
 | `plugin-package.yml` | 改动 `plugin/**`、推 tag `v*`、手动 | `pytest` → 打离线插件 zip（`dist/offline-market-plugin-<ver>-linux-x86_64.zip` + sha256）→ 解压后 `compileall` 复验 → 上传 artifact（tag 时挂到 Release） |
 
 发一个版本：
