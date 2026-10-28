@@ -329,6 +329,9 @@ pub struct AgentRow {
     pub visibility: String,
     pub latest_version: Option<String>,
     pub created_at: i64,
+    /// Newest version upload time, falling back to the entry's `created_at`.
+    pub updated_at: i64,
+    pub download_count: i64,
     pub withdrawn_at: Option<i64>,
     pub takedown_at: Option<i64>,
     pub takedown_reason: Option<String>,
@@ -353,6 +356,8 @@ fn row_to_agent(row: &Row<'_>, public_url: &str) -> rusqlite::Result<AgentRow> {
         visibility: row.get("visibility")?,
         latest_version: latest,
         created_at: row.get("created_at")?,
+        updated_at: row.get("updated_at")?,
+        download_count: row.get("download_count")?,
         withdrawn_at: row.get("withdrawn_at")?,
         takedown_at: row.get("takedown_at")?,
         takedown_reason: row.get("takedown_reason")?,
@@ -366,7 +371,9 @@ fn row_to_agent(row: &Row<'_>, public_url: &str) -> rusqlite::Result<AgentRow> {
 const AGENT_SELECT: &str = r#"
 SELECT a.slug, a.name, a.description, a.owner_tenant, t.display_name AS owner_name,
        a.visibility, a.latest_version, a.created_at, a.withdrawn_at,
-       a.takedown_at, a.takedown_reason,
+       a.takedown_at, a.takedown_reason, a.download_count,
+       COALESCE((SELECT MAX(v.created_at) FROM agent_versions v WHERE v.slug = a.slug),
+                a.created_at) AS updated_at,
        COALESCE((SELECT COUNT(*) FROM agent_versions v WHERE v.slug = a.slug), 0) AS versions,
        COALESCE((SELECT SUM(size_bytes) FROM agent_versions v WHERE v.slug = a.slug), 0) AS size_bytes,
        COALESCE((SELECT skill_count FROM agent_versions v
@@ -383,6 +390,18 @@ pub struct ListQuery {
     pub page: i64,
     #[serde(default = "twenty")]
     pub limit: i64,
+    /// `created` (default) | `downloads` | `updated`.
+    #[serde(default)]
+    pub sort: String,
+}
+
+/// Whitelisted ORDER BY; mirrors `api::skill_order` for agents.
+fn agent_order(sort: &str) -> &'static str {
+    match crate::api::normalize_sort(sort) {
+        "downloads" => "a.download_count DESC, a.created_at DESC",
+        "updated" => "updated_at DESC, a.created_at DESC",
+        _ => "a.created_at DESC",
+    }
 }
 
 fn one() -> i64 {
@@ -401,6 +420,7 @@ pub async fn list_agents(
     let limit = query.limit.clamp(1, 50);
     let offset = (query.page.max(1) - 1) * limit;
     let pattern = format!("%{}%", query.q.trim());
+    let order = agent_order(&query.sort);
 
     let db = app.db();
     db.execute(
@@ -410,12 +430,23 @@ pub async fn list_agents(
     )
     .map_err(ApiError::db)?;
 
+    let total: i64 = db
+        .query_row(
+            "SELECT COUNT(*) FROM agents a
+             WHERE a.takedown_at IS NULL AND a.withdrawn_at IS NULL
+               AND (a.visibility = 'public' OR a.owner_tenant = ?1)
+               AND (a.slug LIKE ?2 OR a.name LIKE ?2)",
+            params![tenant.0, pattern],
+            |row| row.get(0),
+        )
+        .map_err(ApiError::db)?;
+
     let sql = format!(
         "{AGENT_SELECT}
          WHERE a.takedown_at IS NULL AND a.withdrawn_at IS NULL
            AND (a.visibility = 'public' OR a.owner_tenant = ?1)
            AND (a.slug LIKE ?2 OR a.name LIKE ?2)
-         ORDER BY a.created_at DESC
+         ORDER BY {order}
          LIMIT ?3 OFFSET ?4"
     );
     let mut stmt = db.prepare(&sql).map_err(ApiError::db)?;
@@ -433,9 +464,13 @@ pub async fn list_agents(
         items = rows.len(),
         "agent listing"
     );
-    Ok(Json(
-        json!({ "page": query.page.max(1), "limit": limit, "items": rows }),
-    ))
+    Ok(Json(json!({
+        "page": query.page.max(1),
+        "limit": limit,
+        "total": total,
+        "sort": crate::api::normalize_sort(&query.sort),
+        "items": rows
+    })))
 }
 
 /// GET /api/v1/agents/mine

@@ -182,8 +182,10 @@ def build_router(settings: PluginSettings):
         return call(client().stats)
 
     @router.get("/skills")
-    def list_skills(q: str = "", page: int = 1, limit: int = 20) -> Any:
-        return call(client().list_skills, q, page, limit)
+    def list_skills(
+        q: str = "", page: int = 1, limit: int = 20, sort: str = "created"
+    ) -> Any:
+        return call(client().list_skills, q, page, limit, sort)
 
     @router.get("/mine")
     def list_mine() -> Any:
@@ -289,8 +291,10 @@ def build_router(settings: PluginSettings):
     # ------------------------------------------------------- agent market ---
 
     @router.get("/agents")
-    def list_agents(q: str = "", page: int = 1, limit: int = 20) -> Any:
-        return call(client().list_agents, q, page, limit)
+    def list_agents(
+        q: str = "", page: int = 1, limit: int = 20, sort: str = "created"
+    ) -> Any:
+        return call(client().list_agents, q, page, limit, sort)
 
     @router.get("/agents/mine")
     def list_my_agents() -> Any:

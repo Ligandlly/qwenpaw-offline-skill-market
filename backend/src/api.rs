@@ -90,6 +90,10 @@ pub struct SkillRow {
     pub visibility: String,
     pub latest_version: Option<String>,
     pub created_at: i64,
+    /// Newest version upload time, falling back to the entry's `created_at`.
+    /// Drives the market's "最近更新" sort.
+    pub updated_at: i64,
+    pub download_count: i64,
     pub withdrawn_at: Option<i64>,
     pub takedown_at: Option<i64>,
     pub takedown_reason: Option<String>,
@@ -113,6 +117,8 @@ fn row_to_skill(row: &Row<'_>, public_url: &str) -> rusqlite::Result<SkillRow> {
         visibility: row.get("visibility")?,
         latest_version: latest,
         created_at: row.get("created_at")?,
+        updated_at: row.get("updated_at")?,
+        download_count: row.get("download_count")?,
         withdrawn_at: row.get("withdrawn_at")?,
         takedown_at: row.get("takedown_at")?,
         takedown_reason: row.get("takedown_reason")?,
@@ -139,6 +145,9 @@ const SKILL_SELECT: &str = r#"
 SELECT s.slug, s.name, s.owner_tenant, t.display_name AS owner_name, s.visibility,
        s.latest_version,
        s.created_at, s.withdrawn_at, s.takedown_at, s.takedown_reason,
+       s.download_count,
+       COALESCE((SELECT MAX(v.created_at) FROM skill_versions v WHERE v.slug = s.slug),
+                s.created_at) AS updated_at,
        (SELECT json_extract(v.bundle_json, '$."SKILL.md"')
           FROM skill_versions v
          WHERE v.slug = s.slug AND v.version = s.latest_version) AS manifest,
@@ -158,6 +167,28 @@ pub struct ListQuery {
     pub page: i64,
     #[serde(default = "twenty")]
     pub limit: i64,
+    /// `created` (default) | `downloads` | `updated`.
+    #[serde(default)]
+    pub sort: String,
+}
+
+/// Whitelisted sort keys; anything else degrades to the historical order.
+pub(crate) fn normalize_sort(sort: &str) -> &'static str {
+    match sort {
+        "downloads" => "downloads",
+        "updated" => "updated",
+        _ => "created",
+    }
+}
+
+/// Whitelisted ORDER BY for the market listing. Never interpolate user input
+/// into SQL; unknown values fall back to the historical newest-first order.
+pub(crate) fn skill_order(sort: &str) -> &'static str {
+    match normalize_sort(sort) {
+        "downloads" => "s.download_count DESC, s.created_at DESC",
+        "updated" => "updated_at DESC, s.created_at DESC",
+        _ => "s.created_at DESC",
+    }
 }
 
 fn one() -> i64 {
@@ -187,6 +218,7 @@ pub async fn list_skills(
     let limit = q.limit.clamp(1, 50);
     let offset = (q.page.max(1) - 1) * limit;
     let pattern = format!("%{}%", q.q.trim());
+    let order = skill_order(&q.sort);
 
     let db = app.db();
     db.execute(
@@ -196,12 +228,23 @@ pub async fn list_skills(
     )
     .map_err(ApiError::db)?;
 
+    let total: i64 = db
+        .query_row(
+            "SELECT COUNT(*) FROM skills s
+             WHERE s.takedown_at IS NULL AND s.withdrawn_at IS NULL
+               AND (s.visibility = 'public' OR s.owner_tenant = ?1)
+               AND (s.slug LIKE ?2 OR s.name LIKE ?2)",
+            params![tenant.0, pattern],
+            |row| row.get(0),
+        )
+        .map_err(ApiError::db)?;
+
     let sql = format!(
         "{SKILL_SELECT}
          WHERE s.takedown_at IS NULL AND s.withdrawn_at IS NULL
            AND (s.visibility = 'public' OR s.owner_tenant = ?1)
            AND (s.slug LIKE ?2 OR s.name LIKE ?2)
-         ORDER BY s.created_at DESC
+         ORDER BY {order}
          LIMIT ?3 OFFSET ?4"
     );
     let mut stmt = db.prepare(&sql).map_err(ApiError::db)?;
@@ -221,9 +264,13 @@ pub async fn list_skills(
         items = rows.len(),
         "market listing"
     );
-    Ok(Json(
-        json!({ "page": q.page.max(1), "limit": limit, "items": rows }),
-    ))
+    Ok(Json(json!({
+        "page": q.page.max(1),
+        "limit": limit,
+        "total": total,
+        "sort": normalize_sort(&q.sort),
+        "items": rows
+    })))
 }
 
 /// GET /api/v1/skills/mine — everything the tenant owns, including withdrawn.

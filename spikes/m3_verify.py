@@ -127,6 +127,62 @@ def main() -> int:
                 pass
         report["steps"]["install"] = {"clicked": install_clicked, "ok": installed_ok}
 
+        # 2b) catalogue UX: card view, sort, debounced search, detail drawer ---
+        card_count = page.locator(".ant-card").count()
+        sort_ok = False
+        try:
+            page.locator(".ant-select-selector").first.click()
+            page.get_by_text("下载最多", exact=True).first.click()
+            page.wait_for_timeout(1200)
+            sort_ok = "下载" in page.inner_text("body")
+        except Exception:  # noqa: BLE001
+            pass
+        search = page.get_by_placeholder("搜索技能名或标识符").first
+        search.fill("zzz-no-such-skill")
+        page.wait_for_timeout(1200)
+        debounced = "共 0 个" in page.inner_text("body")
+        search.fill("")
+        page.wait_for_timeout(1200)
+        drawer_ok = False
+        if page.locator(".ant-card").count():
+            page.locator(".ant-card").first.click()
+            page.wait_for_timeout(900)
+            drawer_ok = "复制标识" in page.inner_text("body")
+            page.keyboard.press("Escape")
+            page.wait_for_timeout(500)
+        list_ok = False
+        try:
+            page.get_by_role("button", name="列表").first.click()
+            page.wait_for_timeout(900)
+            list_ok = page.locator(".ant-table").count() > 0
+            page.get_by_role("button", name="卡片").first.click()
+            page.wait_for_timeout(500)
+        except Exception:  # noqa: BLE001
+            pass
+        report["steps"]["catalogue"] = {
+            "cards": card_count,
+            "sort": sort_ok,
+            "debounced_search": debounced,
+            "drawer": drawer_ok,
+            "list_view": list_ok,
+            "ok": card_count > 0 and sort_ok and debounced and drawer_ok and list_ok,
+        }
+
+        # 2c) list API contract: total / sort / downloads / updated_at ---------
+        status, listing, _ = http("GET", f"{MARKET}/api/v1/skills?limit=1&sort=downloads", tenant="")
+        first = (listing.get("items") or [{}])[0]
+        report["steps"]["list_api"] = {
+            "status": status,
+            "sort": listing.get("sort"),
+            "total": listing.get("total"),
+            "fields": sorted(first.keys()),
+            "ok": status == 200
+            and listing.get("sort") == "downloads"
+            and isinstance(listing.get("total"), int)
+            and "download_count" in first
+            and "updated_at" in first,
+        }
+
         # 3) publish ----------------------------------------------------------
         page.get_by_text("发布", exact=True).first.click()
         page.wait_for_timeout(1200)
@@ -214,6 +270,8 @@ def main() -> int:
     report["ok"] = (
         report["steps"]["menu"]["ok"]
         and report["steps"]["install"]["ok"]
+        and report["steps"]["catalogue"]["ok"]
+        and report["steps"]["list_api"]["ok"]
         and report["steps"]["publish"]["ok"]
         and report["steps"]["mine"]["ok"]
         and report["steps"]["installed_before_takedown"]["ok"]

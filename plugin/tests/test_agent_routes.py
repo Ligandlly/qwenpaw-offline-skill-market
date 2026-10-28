@@ -57,7 +57,7 @@ def test_agent_listing_and_mine_proxy(api, env, backend, host):
 
     response = api.get("/offline-market/agents?q=qa&page=2&limit=5")
     assert response.status_code == 200
-    assert backend.requests[-1]["path"] == "/api/v1/agents?q=qa&page=2&limit=5"
+    assert backend.requests[-1]["path"] == "/api/v1/agents?q=qa&page=2&limit=5&sort=created"
     assert backend.requests[-1]["headers"]["x-tenant-id"] == "tenant-a"
 
     assert api.get("/offline-market/agents/mine").json() == {"items": []}

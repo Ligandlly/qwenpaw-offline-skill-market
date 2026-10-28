@@ -15,6 +15,7 @@ use tower::ServiceExt;
 
 struct Harness {
     app: Router,
+    state: offline_market_backend::state::Shared,
 }
 
 const GOOD_MANIFEST: &str = "---\nname: demo\ndescription: a demo skill\n---\n\n# hello\n";
@@ -41,7 +42,10 @@ impl Harness {
         let conn = db::open_memory().expect("in-memory db");
         let state = build_state(cfg, conn);
         offline_market_backend::admin::ensure_admin(&state);
-        Self { app: router(state) }
+        Self {
+            app: router(state.clone()),
+            state,
+        }
     }
 
     async fn call(
@@ -762,4 +766,88 @@ async fn dashboard_counts_visible_active_items_and_keeps_download_history() {
         .await;
     assert_eq!(stats["skills"]["total"], 1);
     assert_eq!(stats["skills"]["downloads"], 2);
+}
+
+#[tokio::test]
+async fn listing_reports_totals_and_whitelisted_sort_orders() {
+    let h = Harness::new();
+    for slug in ["alpha", "beta", "gamma"] {
+        let (status, body) = h.publish("tenant-a", slug, "1.0.0", "public").await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+    }
+
+    // beta gets two downloads, gamma one, alpha none.
+    for _ in 0..2 {
+        let (status, _, _) = h
+            .call("GET", "/skills/beta/1.0.0", Some("tenant-b"), None, None)
+            .await;
+        assert_eq!(status, StatusCode::OK);
+    }
+    let (status, _, _) = h
+        .call("GET", "/skills/gamma/1.0.0", Some("tenant-b"), None, None)
+        .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, listing, _) = h
+        .call(
+            "GET",
+            "/api/v1/skills?limit=1&sort=downloads",
+            Some("tenant-b"),
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{listing}");
+    assert_eq!(listing["total"], 3);
+    assert_eq!(listing["sort"], "downloads");
+    assert_eq!(listing["items"].as_array().unwrap().len(), 1);
+    assert_eq!(listing["items"][0]["slug"], "beta");
+    assert_eq!(listing["items"][0]["download_count"], 2);
+    assert!(listing["items"][0]["updated_at"].as_i64().unwrap() > 0);
+
+    let (_, second, _) = h
+        .call(
+            "GET",
+            "/api/v1/skills?limit=1&page=2&sort=downloads",
+            Some("tenant-b"),
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(second["items"][0]["slug"], "gamma");
+    assert_eq!(second["items"][0]["download_count"], 1);
+
+    // `updated` sorts by newest version time. Move alpha's version forward
+    // directly instead of sleeping on wall-clock seconds.
+    h.state
+        .db()
+        .execute(
+            "UPDATE skill_versions SET created_at = 4102444800 WHERE slug = 'alpha'",
+            [],
+        )
+        .unwrap();
+    let (_, updated, _) = h
+        .call(
+            "GET",
+            "/api/v1/skills?sort=updated&limit=50",
+            Some("tenant-b"),
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(updated["sort"], "updated");
+    assert_eq!(updated["items"][0]["slug"], "alpha");
+
+    // Unknown sort keys fall back to the default (and are echoed normalised).
+    let (_, fallback, _) = h
+        .call(
+            "GET",
+            "/api/v1/skills?sort=DROP%20TABLE",
+            Some("tenant-b"),
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(fallback["total"], 3);
+    assert_eq!(fallback["sort"], "created");
 }

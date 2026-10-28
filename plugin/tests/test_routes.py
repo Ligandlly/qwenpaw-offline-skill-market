@@ -59,7 +59,7 @@ def test_list_and_mine_pass_the_tenant_header(api, env, backend):
     backend.on("GET", "/api/v1/skills", 200, {"items": []})
     backend.on("GET", "/api/v1/skills/mine", 200, {"items": [{"slug": "x"}]})
     assert api.get("/offline-market/skills?q=demo&page=2&limit=5").status_code == 200
-    assert backend.requests[-1]["path"] == "/api/v1/skills?q=demo&page=2&limit=5"
+    assert backend.requests[-1]["path"] == "/api/v1/skills?q=demo&page=2&limit=5&sort=created"
     assert backend.requests[-1]["headers"]["x-tenant-id"] == "tenant-a"
 
     assert api.get("/offline-market/mine").json()["items"][0]["slug"] == "x"
@@ -297,3 +297,26 @@ def test_lookup_forwards_display_names(api, env, backend):
     before = len(backend.requests)
     assert api.get("/offline-market/lookup?names=").json() == {"items": []}
     assert len(backend.requests) == before
+
+
+def test_market_lists_forward_sort_and_return_total(api, env, backend):
+    backend.on(
+        "GET",
+        "/api/v1/skills",
+        200,
+        {"items": [], "total": 7, "sort": "downloads"},
+    )
+    backend.on(
+        "GET",
+        "/api/v1/agents",
+        200,
+        {"items": [], "total": 0, "sort": "updated"},
+    )
+    body = api.get("/offline-market/skills?sort=downloads").json()
+    assert body["total"] == 7
+    assert body["sort"] == "downloads"
+    assert backend.requests[-1]["path"] == "/api/v1/skills?page=1&limit=20&sort=downloads"
+
+    body = api.get("/offline-market/agents?sort=updated").json()
+    assert body["sort"] == "updated"
+    assert backend.requests[-1]["path"] == "/api/v1/agents?page=1&limit=20&sort=updated"

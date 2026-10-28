@@ -126,9 +126,13 @@ class BackendClient:
         """Dashboard aggregates: totals, this month's new items, downloads."""
         return self._request("GET", "/api/v1/stats")
 
-    def list_skills(self, query: str = "", page: int = 1, limit: int = 20) -> Any:
+    def list_skills(
+        self, query: str = "", page: int = 1, limit: int = 20, sort: str = "created"
+    ) -> Any:
         return self._request(
-            "GET", "/api/v1/skills", query={"q": query, "page": page, "limit": limit}
+            "GET",
+            "/api/v1/skills",
+            query={"q": query, "page": page, "limit": limit, "sort": sort},
         )
 
     def mine(self) -> Any:
@@ -185,9 +189,13 @@ class BackendClient:
 
     # ------------------------------------------------------- agent market ---
 
-    def list_agents(self, query: str = "", page: int = 1, limit: int = 20) -> Any:
+    def list_agents(
+        self, query: str = "", page: int = 1, limit: int = 20, sort: str = "created"
+    ) -> Any:
         return self._request(
-            "GET", "/api/v1/agents", query={"q": query, "page": page, "limit": limit}
+            "GET",
+            "/api/v1/agents",
+            query={"q": query, "page": page, "limit": limit, "sort": sort},
         )
 
     def mine_agents(self) -> Any:

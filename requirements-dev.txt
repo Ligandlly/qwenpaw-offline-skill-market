@@ -9,7 +9,7 @@
 # 用法（建议 3.12，与 CI 一致）：
 #   python3.12 -m venv .venv
 #   .venv/bin/python -m pip install -r requirements-dev.txt
-#   cd plugin && python -m pytest -q          # 98 项，不需要宿主、不需要网络
+#   cd plugin && python -m pytest -q          # 108 项，不需要宿主、不需要网络
 #   python -m compileall -q plugin/offline_market plugin/backend.py
 #
 # QwenPaw 本体（qwenpaw==2.2.2）不在这个文件里：它只在跑真实宿主的 spike

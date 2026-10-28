@@ -198,6 +198,9 @@ pub async fn list_skills(
     let sql = r#"
         SELECT s.slug, s.name, s.owner_tenant, t.display_name AS owner_name,
                s.visibility, s.latest_version,
+               s.download_count,
+               COALESCE((SELECT MAX(v.created_at) FROM skill_versions v WHERE v.slug = s.slug),
+                        s.created_at) AS updated_at,
                s.created_at, s.withdrawn_at, s.takedown_at, s.takedown_reason,
                (SELECT json_extract(v.bundle_json, '$."SKILL.md"')
                   FROM skill_versions v
@@ -383,6 +386,8 @@ fn row_to_admin_skill(row: &rusqlite::Row<'_>, public_url: &str) -> rusqlite::Re
         visibility: row.get("visibility")?,
         latest_version: row.get("latest_version")?,
         created_at: row.get("created_at")?,
+        updated_at: row.get("updated_at")?,
+        download_count: row.get("download_count")?,
         withdrawn_at: row.get("withdrawn_at")?,
         takedown_at: row.get("takedown_at")?,
         takedown_reason: row.get("takedown_reason")?,

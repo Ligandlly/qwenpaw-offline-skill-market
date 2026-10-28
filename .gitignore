@@ -21,6 +21,9 @@ target/
 # local code index (codegraph)
 .codegraph/
 
+# pi goal/agent state
+.pi/
+
 # local data
 data/
 *.sqlite

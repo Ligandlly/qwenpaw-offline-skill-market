@@ -13,7 +13,7 @@
  * or the host API directly.
  */
 const PLUGIN_ID = "offline-market";
-const PLUGIN_VERSION = "0.1.4"; // keep in sync with plugin.json
+const PLUGIN_VERSION = "0.1.6"; // keep in sync with plugin.json
 const PLUGIN_LABEL = "内网市场";
 const VISIBILITY_LABEL = { public: "公开", tenant: "仅本租户" };
 const STATE_LABEL = { active: "已上架", withdrawn: "已撤回", taken_down: "已下架" };
@@ -260,8 +260,11 @@ async function request(path, init) {
     text.length > 2000 ? `… ${text.length} 字节响应体（过长，已省略）` : body,
   );
   if (!response.ok) {
-    const detail = (body && body.detail) || {};
-    const error = new Error(detail.message || `HTTP ${response.status}`);
+    // axum returns either {detail: "text"} or {detail: {code, message}}; keep both
+    const payload = (body && body.detail) || {};
+    const detail = typeof payload === "string" ? {} : payload;
+    const plain = typeof payload === "string" ? payload : (body && body.message) || "";
+    const error = new Error(detail.message || plain || `HTTP ${response.status}`);
     error.code = detail.code || `http_${response.status}`;
     error.status = response.status;
     error.detail = detail;
@@ -329,12 +332,69 @@ whenHost((paw) => {
   const Tabs = antd.Tabs;
   const Table = antd.Table;
   const Modal = antd.Modal;
+  const Drawer = antd.Drawer;
   const Empty = antd.Empty || (() => h("div", null, "暂无数据"));
   const Spin = antd.Spin || (() => h("div", null, "加载中…"));
   const Typography = antd.Typography || {};
   const Text = Typography.Text || ((props) => h("span", props, props.children));
   const Title = Typography.Title || ((props) => h("h3", props, props.children));
   const Paragraph = Typography.Paragraph || ((props) => h("p", props, props.children));
+
+  // --------------------------------------------------------------- theme ---
+
+  const useAntdToken =
+    antd.theme && typeof antd.theme.useToken === "function" ? antd.theme.useToken : null;
+
+  const EMPTY_TOKEN_STATE = { token: {} };
+
+  function isDarkColor(value) {
+    const match = /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(String(value || ""));
+    if (!match) return false;
+    let hex = match[1];
+    if (hex.length === 3) {
+      hex = hex
+        .split("")
+        .map((part) => part + part)
+        .join("");
+    }
+    const red = parseInt(hex.slice(0, 2), 16);
+    const green = parseInt(hex.slice(2, 4), 16);
+    const blue = parseInt(hex.slice(4, 6), 16);
+    return (0.299 * red + 0.587 * green + 0.114 * blue) / 255 < 0.5;
+  }
+
+  // antd v5 tokens when the console provides them (it does), neutral fallbacks
+  // otherwise. Keeps our own surfaces readable on both themes without a CSS
+  // file, and never overrides the host's own look.
+  function useMarketTheme() {
+    const state = useAntdToken ? useAntdToken() : EMPTY_TOKEN_STATE;
+    const token = state.token || {};
+    const surface = token.colorBgContainer || "#ffffff";
+    const dark = isDarkColor(surface);
+    return {
+      dark,
+      token,
+      palette: {
+        ink: token.colorText || (dark ? "#e5e7eb" : "#0f172a"),
+        muted: token.colorTextSecondary || (dark ? "#a1a1aa" : "#64748b"),
+        faint: token.colorTextTertiary || (dark ? "#71717a" : "#94a3b8"),
+        line: token.colorBorderSecondary || (dark ? "#303030" : "#e2e8f0"),
+        surface,
+        surfaceAlt: token.colorFillTertiary || (dark ? "#262626" : "#f1f5f9"),
+        border: dark
+          ? "1px solid rgba(255, 255, 255, 0.12)"
+          : "1px solid rgba(148, 163, 184, 0.18)",
+        shadow: dark
+          ? "0 10px 30px rgba(0, 0, 0, 0.45)"
+          : "0 10px 30px rgba(15, 23, 42, 0.06)",
+        skills: token.colorPrimary || "#6366f1",
+        agents: "#14b8a6",
+        downloads: "#0ea5e9",
+        fresh: "#f59e0b",
+      },
+    };
+  }
+
 
   // ------------------------------------------------------------- identity ---
 
@@ -541,13 +601,15 @@ whenHost((paw) => {
    */
   function useInstalledSlugs(items) {
     const [slugs, setSlugs] = useState(() => new Set());
-    const confirmed = useRef(new Set()); // display names verified as ours
+    const [versions, setVersions] = useState(() => ({}));
+    const confirmed = useRef(new Map()); // display name -> installed version_text
     const marked = useRef(new Set()); // slugs installed from this page
 
     useEffect(() => {
       let alive = true;
       if (!items.length) {
         setSlugs(new Set());
+        setVersions({});
         return undefined;
       }
       (async () => {
@@ -568,18 +630,27 @@ whenHost((paw) => {
               const detail = await getJson(`/skills/${encodeURIComponent(item.name)}`).catch(
                 () => null,
               );
-              if (detail && detail.installed_from === PLUGIN_ID) confirmed.current.add(item.name);
+              if (detail && detail.installed_from === PLUGIN_ID) {
+                confirmed.current.set(
+                  item.name,
+                  String(detail.version_text || detail.version || detail.last_updated || ""),
+                );
+              }
             }),
           );
           if (!alive) return;
           const next = new Set();
+          const nextVersions = {};
           items.forEach((item) => {
             if (marked.current.has(item.slug) || confirmed.current.has(item.name)) {
               next.add(item.slug);
+              const version = confirmed.current.get(item.name);
+              if (version) nextVersions[item.slug] = version;
             }
           });
           logger.debug(`已安装检查完成：市场里已安装 ${next.size} 条`, [...next]);
           setSlugs(next);
+          setVersions(nextVersions);
         } catch (err) {
           logger.warn("已安装检查失败（按钮照旧可点，重复安装由宿主自身拦）", err);
         }
@@ -595,163 +666,657 @@ whenHost((paw) => {
       setSlugs((prev) => (prev.has(slug) ? prev : new Set(prev).add(slug)));
     }, []);
 
-    return [slugs, mark];
+    return [slugs, mark, versions];
+  }
+  // ------------------------------------------------------------ catalogue ---
+  // Shared by the skill and agent market tabs: debounced search, server-side
+  // sorting, paging with infinite scroll, card/list switch and a detail
+  // drawer. Both tabs pass their own install handler; everything else is
+  // identical, so the two lists can never drift apart again.
+
+  const CATALOGUE_LIMIT = 20;
+  const VIEW_KEY = "offline-market:view";
+  const SORT_OPTIONS = [
+    ["created", "最新发布"],
+    ["downloads", "下载最多"],
+    ["updated", "最近更新"],
+  ];
+
+  function storedView() {
+    try {
+      return window.localStorage.getItem(VIEW_KEY) === "list" ? "list" : "card";
+    } catch (err) {
+      return "card"; // storage disabled: cards are the nicer default anyway
+    }
   }
 
-  function MarketTab({ limits, onNotice, refreshToken, tenant }) {
-    const [items, setItems] = useState([]);
-    const [query, setQuery] = useState("");
-    const [loading, setLoading] = useState(false);
-    const [installed, markInstalled] = useInstalledSlugs(items);
-    // Local to the list: notify the page, and remember the row just installed
-    // so it turns 已安装 immediately instead of after a reload.
-    const onInstallDone = useCallback(
-      (notice) => {
-        onNotice(notice);
-        if (notice && notice.type === "success" && notice.slug) markInstalled(notice.slug);
-      },
-      [onNotice, markInstalled],
-    );
-    const installer = useInstaller(onInstallDone);
+  function formatStamp(seconds) {
+    if (!seconds) return "—";
+    const date = new Date(Number(seconds) * 1000);
+    if (Number.isNaN(date.getTime())) return "—";
+    return [
+      date.getFullYear(),
+      String(date.getMonth() + 1).padStart(2, "0"),
+      String(date.getDate()).padStart(2, "0"),
+    ].join("-");
+  }
 
-    const load = useCallback(
-      async (value) => {
-        setLoading(true);
-        logger.debug(`市场列表加载 q=${JSON.stringify(value || "")}`);
+  function formatBytes(value) {
+    const size = Number(value) || 0;
+    if (size < 1024) return `${size} B`;
+    if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
+    return `${(size / 1024 / 1024).toFixed(1)} MB`;
+  }
+
+  function versionParts(text) {
+    return String(text || "")
+      .trim()
+      .replace(/^v/i, "")
+      .split(/[.+\-]/)
+      .filter((part) => part !== "")
+      .map((part) => (/^\d+$/.test(part) ? Number(part) : part));
+  }
+
+  // 1.2.10 > 1.2.9; non-numeric segments (dates, hashes) compare as strings so
+  // the answer stays stable instead of throwing.
+  function compareVersionText(left, right) {
+    const a = versionParts(left);
+    const b = versionParts(right);
+    const size = Math.max(a.length, b.length);
+    for (let index = 0; index < size; index += 1) {
+      const x = a[index] === undefined ? 0 : a[index];
+      const y = b[index] === undefined ? 0 : b[index];
+      if (x === y) continue;
+      if (typeof x === "number" && typeof y === "number") return x < y ? -1 : 1;
+      return String(x) < String(y) ? -1 : 1;
+    }
+    return 0;
+  }
+
+  function isNewerVersion(latest, installed) {
+    if (!latest || !installed) return false;
+    return compareVersionText(latest, installed) > 0;
+  }
+
+  function useDebounced(value, delay) {
+    const [settled, setSettled] = useState(value);
+    useEffect(() => {
+      const timer = setTimeout(() => setSettled(value), delay);
+      return () => clearTimeout(timer);
+    }, [value, delay]);
+    return settled;
+  }
+
+  function useCatalogue({ kind, refreshToken, onNotice }) {
+    const [items, setItems] = useState([]);
+    const [total, setTotal] = useState(0);
+    const [query, setQuery] = useState("");
+    const appliedQuery = useDebounced(query, 300);
+    const [sort, setSort] = useState("created");
+    const [view, setViewState] = useState(storedView);
+    const [page, setPage] = useState(1);
+    // start in the loading state: the first paint must not flash the empty state
+    const [loading, setLoading] = useState(true);
+    const [loadingMore, setLoadingMore] = useState(false);
+    const [error, setError] = useState("");
+    const [hasMore, setHasMore] = useState(false);
+    const requestId = useRef(0);
+
+    const setView = useCallback((value) => {
+      setViewState(value);
+      try {
+        window.localStorage.setItem(VIEW_KEY, value);
+      } catch (err) {
+        // private mode: the switch still works for this session
+      }
+    }, []);
+
+    const fetchPage = useCallback(
+      async (targetPage, append) => {
+        const id = requestId.current + 1;
+        requestId.current = id;
+        if (append) {
+          setLoadingMore(true);
+        } else {
+          setLoading(true);
+          setError("");
+        }
+        logger.debug(
+          `市场目录加载 kind=${kind} q=${JSON.stringify(appliedQuery)} sort=${sort} page=${targetPage}`,
+        );
         try {
           const body = await getJson(
-            `/offline-market/skills?q=${encodeURIComponent(value || "")}&limit=50`,
+            `/offline-market/${kind}?q=${encodeURIComponent(appliedQuery)}` +
+              `&sort=${encodeURIComponent(sort)}&page=${targetPage}&limit=${CATALOGUE_LIMIT}`,
           );
-          const items = body.items || [];
-          setItems(items);
-          logger.debug(
-            `市场列表 ${items.length} 条`,
-            items.map(
-              (item) =>
-                `${item.slug}@${item.latest_version || "-"}${item.owner_name ? `(${item.owner_name})` : ""}`,
-            ),
-          );
+          if (id !== requestId.current) return; // a newer request won
+          const next = body.items || [];
+          const count = Number(body.total) || 0;
+          setItems((previous) => (append ? previous.concat(next) : next));
+          setTotal(count);
+          setPage(targetPage);
+          setHasMore(next.length > 0 && targetPage * CATALOGUE_LIMIT < count);
+          logger.debug(`市场目录 ${kind} 第 ${targetPage} 页 ${next.length} 条（共 ${count}）`);
         } catch (err) {
-          logger.error("市场列表加载失败", err);
-          onNotice({ type: "error", text: err.message });
-          setItems([]);
+          if (id !== requestId.current) return;
+          logger.error(`市场目录加载失败 kind=${kind}`, err);
+          setError(err.message || String(err));
+          if (!append) {
+            setItems([]);
+            setTotal(0);
+            setHasMore(false);
+          }
+          onNotice && onNotice({ type: "error", text: err.message });
         } finally {
-          setLoading(false);
+          if (id === requestId.current) {
+            setLoading(false);
+            setLoadingMore(false);
+          }
         }
       },
-      [onNotice],
+      [kind, appliedQuery, sort, onNotice],
     );
 
     useEffect(() => {
-      // Mount, and once more after a successful publish (refreshToken), so the
-      // new version shows up without the user pressing 搜索 or 全部.
-      // `query` is deliberately not a dependency: typing must not refetch.
-      load(query);
-    }, [load, refreshToken]);
+      // Mount, query/sort change, and once after a publish (refreshToken).
+      setPage(1);
+      fetchPage(1, false);
+    }, [fetchPage, refreshToken]);
 
-    const columns = useMemo(
-      () => [
-        {
-          title: "技能",
-          dataIndex: "name",
-          render: (_, row) =>
-            h(
-              "div",
-              null,
-              h("div", null, h(Text, { strong: true }, row.name)),
-              h(Text, { type: "secondary", code: true }, `${row.slug}@${row.latest_version || "-"}`),
-            ),
+    const loadMore = useCallback(() => {
+      if (loading || loadingMore || !hasMore) return;
+      fetchPage(page + 1, true);
+    }, [loading, loadingMore, hasMore, page, fetchPage]);
+
+    const retry = useCallback(() => {
+      setPage(1);
+      fetchPage(1, false);
+    }, [fetchPage]);
+
+    return {
+      items,
+      total,
+      query,
+      setQuery,
+      appliedQuery,
+      sort,
+      setSort,
+      view,
+      setView,
+      loading,
+      loadingMore,
+      error,
+      hasMore,
+      loadMore,
+      retry,
+    };
+  }
+
+  function CatalogueView({
+    kind,
+    tenant,
+    catalogue,
+    installed,
+    installedVersions,
+    busySlug,
+    onInstall,
+    emptyText,
+    searchPlaceholder,
+  }) {
+    const [detail, setDetail] = useState(null);
+    const sentinel = useRef(null);
+    const loadMoreRef = useRef(catalogue.loadMore);
+    loadMoreRef.current = catalogue.loadMore;
+
+    useEffect(() => {
+      const node = sentinel.current;
+      if (!node || !catalogue.hasMore || typeof IntersectionObserver === "undefined") {
+        return undefined;
+      }
+      const observer = new IntersectionObserver(
+        (entries) => {
+          if (entries.some((entry) => entry.isIntersecting)) loadMoreRef.current();
         },
-        // Same column as 已安装: the backend parses it out of the latest
-        // version's SKILL.md frontmatter, so both lists read alike.
+        { rootMargin: "200px" },
+      );
+      observer.observe(node);
+      return () => observer.disconnect();
+    }, [catalogue.hasMore, catalogue.items.length, catalogue.loading]);
+
+    const installedVersion = (row) => (installedVersions && installedVersions[row.slug]) || "";
+    const isInstalled = (row) => installed.has(row.slug);
+
+    const stateTag = (row) => {
+      if (!isInstalled(row)) return null;
+      const local = installedVersion(row);
+      if (isNewerVersion(row.latest_version, local)) {
+        return h(Tag, { color: "orange" }, `可更新 ${local} → ${row.latest_version}`);
+      }
+      return h(Tag, { color: "green" }, local ? `已安装 ${local}` : "已安装");
+    };
+
+    const actionButton = (row) => {
+      if (!isInstalled(row)) {
+        return h(
+          Button,
+          {
+            type: "primary",
+            size: "small",
+            loading: busySlug === row.slug,
+            disabled: Boolean(busySlug) && busySlug !== row.slug,
+            onClick: () => onInstall(row),
+          },
+          "安装",
+        );
+      }
+      const local = installedVersion(row);
+      if (isNewerVersion(row.latest_version, local)) {
+        return h(
+          Button,
+          {
+            type: "primary",
+            size: "small",
+            loading: busySlug === row.slug,
+            disabled: Boolean(busySlug) && busySlug !== row.slug,
+            onClick: () => onInstall(row),
+          },
+          "更新",
+        );
+      }
+      return h(Button, { size: "small", disabled: true }, "已安装");
+    };
+
+    const nameCell = (row) =>
+      h(
+        "div",
+        null,
+        h("div", null, h(Text, { strong: true }, row.name)),
+        h(Text, { type: "secondary", code: true }, `${row.slug}@${row.latest_version || "-"}`),
+      );
+
+    const publisherCell = (row) => {
+      const label = row.owner_name || row.owner_tenant || "-";
+      const mine = Boolean(tenant) && row.owner_tenant === tenant;
+      return h("span", { title: row.owner_tenant || "" }, mine ? `${label}（我）` : label);
+    };
+
+    const columns = [
+      { title: "名称", dataIndex: "name", render: (_, row) => nameCell(row) },
+      {
+        title: "描述",
+        dataIndex: "description",
+        ellipsis: true,
+        render: (value) => value || h(Text, { type: "secondary" }, "—"),
+      },
+      kind === "agents"
+        ? { title: "技能", dataIndex: "skill_count", width: 70 }
+        : { title: "版本数", dataIndex: "versions", width: 80 },
+      {
+        title: "可见性",
+        dataIndex: "visibility",
+        width: 100,
+        render: (value) =>
+          h(Tag, { color: value === "public" ? "blue" : "gold" }, VISIBILITY_LABEL[value] || value),
+      },
+      { title: "发布者", dataIndex: "owner_name", width: 150, render: (_, row) => publisherCell(row) },
+      { title: "下载", dataIndex: "download_count", width: 80, render: (value) => Number(value) || 0 },
+      { title: "更新", dataIndex: "updated_at", width: 110, render: (value) => formatStamp(value) },
+      {
+        title: "操作",
+        width: 160,
+        render: (_, row) =>
+          h(
+            "div",
+            {
+              style: { display: "flex", flexDirection: "column", gap: 4, alignItems: "flex-start" },
+              // the row itself opens the drawer; buttons must not double-fire
+              onClick: (event) => event.stopPropagation(),
+            },
+            actionButton(row),
+            stateTag(row),
+          ),
+      },
+    ];
+
+    const cardGrid = () =>
+      h(
+        "div",
         {
-          title: "描述",
-          dataIndex: "description",
-          ellipsis: true,
-          render: (value) => value || h(Text, { type: "secondary" }, "—"),
-        },
-        {
-          title: "可见性",
-          dataIndex: "visibility",
-          width: 110,
-          render: (value) =>
-            h(Tag, { color: value === "public" ? "blue" : "gold" }, VISIBILITY_LABEL[value] || value),
-        },
-        {
-          title: "发布者",
-          dataIndex: "owner_name",
-          width: 160,
-          // `owner_name` is whatever the publisher's runtime reported; skills
-          // published before that existed (or by a tenant that never sent one)
-          // fall back to the tenant id the market really knows.
-          render: (_, row) => {
-            const label = row.owner_name || row.owner_tenant || "-";
-            const mine = Boolean(tenant) && row.owner_tenant === tenant;
-            return h("span", { title: row.owner_tenant || "" }, mine ? `${label}（我）` : label);
+          style: {
+            display: "grid",
+            gridTemplateColumns: "repeat(auto-fill, minmax(min(100%, 280px), 1fr))",
+            gap: 12,
           },
         },
-        { title: "版本数", dataIndex: "versions", width: 90 },
+        catalogue.items.map((row) =>
+          h(
+            Card,
+            {
+              key: row.slug,
+              size: "small",
+              hoverable: true,
+              onClick: () => setDetail(row),
+              style: { cursor: "pointer" },
+            },
+            h(
+              "div",
+              { style: { display: "flex", justifyContent: "space-between", gap: 8 } },
+              h(Text, { strong: true, style: { fontSize: 15 } }, row.name),
+              h(
+                Tag,
+                { color: row.visibility === "public" ? "blue" : "gold" },
+                VISIBILITY_LABEL[row.visibility] || row.visibility,
+              ),
+            ),
+            h(
+              Text,
+              { type: "secondary", code: true },
+              `${row.slug}@${row.latest_version || "-"}`,
+            ),
+            h(
+              Paragraph,
+              {
+                type: "secondary",
+                style: {
+                  margin: "8px 0",
+                  minHeight: 40,
+                  display: "-webkit-box",
+                  WebkitLineClamp: 2,
+                  WebkitBoxOrient: "vertical",
+                  overflow: "hidden",
+                },
+              },
+              row.description || "—",
+            ),
+            h(
+              Space,
+              { size: 12, wrap: true },
+              h(Text, { type: "secondary" }, `↓ ${Number(row.download_count) || 0}`),
+              h(Text, { type: "secondary" }, `更新 ${formatStamp(row.updated_at)}`),
+              kind === "agents"
+                ? h(Text, { type: "secondary" }, `${row.skill_count || 0} 个技能`)
+                : h(Text, { type: "secondary" }, `${row.versions || 0} 个版本`),
+            ),
+            h(
+              "div",
+              {
+                style: {
+                  marginTop: 12,
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  gap: 8,
+                },
+              },
+              h(
+                "div",
+                {
+                  style: { display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center" },
+                  onClick: (event) => event.stopPropagation(),
+                },
+                stateTag(row),
+                h(Text, { type: "secondary" }, row.owner_name || row.owner_tenant || "-"),
+              ),
+              h(
+                "div",
+                { onClick: (event) => event.stopPropagation() },
+                actionButton(row),
+              ),
+            ),
+          ),
+        ),
+      );
+
+    const sortControl = Select
+      ? h(Select, {
+          value: catalogue.sort,
+          style: { width: 130 },
+          onChange: catalogue.setSort,
+          options: SORT_OPTIONS.map(([value, label]) => ({ value, label })),
+        })
+      : h(
+          Space,
+          null,
+          SORT_OPTIONS.map(([value, label]) =>
+            h(
+              Button,
+              {
+                key: value,
+                size: "small",
+                type: catalogue.sort === value ? "primary" : "default",
+                onClick: () => catalogue.setSort(value),
+              },
+              label,
+            ),
+          ),
+        );
+
+    const viewControl = h(
+      Space,
+      null,
+      h(
+        Button,
         {
-          title: "操作",
-          width: 150,
-          render: (_, row) =>
-            installed.has(row.slug)
-              ? // antd's disabled button is the greyed-out 已安装 state
-                h(Button, { size: "small", disabled: true, title: "已安装" }, "已安装")
-              : h(
-                  Button,
-                  {
-                    type: "primary",
-                    size: "small",
-                    loading: installer.busySlug === row.slug,
-                    disabled: Boolean(installer.busySlug) && installer.busySlug !== row.slug,
-                    onClick: () => installer.install(row),
-                  },
-                  "安装",
-                ),
+          size: "small",
+          type: catalogue.view === "card" ? "primary" : "default",
+          onClick: () => catalogue.setView("card"),
         },
-      ],
-      [installer, installed],
+        "卡片",
+      ),
+      h(
+        Button,
+        {
+          size: "small",
+          type: catalogue.view === "list" ? "primary" : "default",
+          onClick: () => catalogue.setView("list"),
+        },
+        "列表",
+      ),
     );
+
+    const detailBody = detail
+      ? h(
+          "div",
+          null,
+          h(
+            Paragraph,
+            { type: "secondary", style: { marginTop: 0 } },
+            detail.description || "没有描述",
+          ),
+          [
+            ["标识", `${detail.slug}@${detail.latest_version || "-"}`],
+            ["状态", h(Tag, { color: "green" }, "已上架")],
+            [
+              "可见性",
+              h(
+                Tag,
+                { color: detail.visibility === "public" ? "blue" : "gold" },
+                VISIBILITY_LABEL[detail.visibility] || detail.visibility,
+              ),
+            ],
+            ["发布者", detail.owner_name || detail.owner_tenant || "-"],
+            ["下载量", String(Number(detail.download_count) || 0)],
+            ["更新时间", formatStamp(detail.updated_at)],
+            ["版本数", String(detail.versions || 0)],
+            ["大小", formatBytes(detail.size_bytes)],
+            ...(kind === "agents"
+              ? [["技能数", String(detail.skill_count || 0)]]
+              : []),
+            ["本机", isInstalled(detail) ? installedVersion(detail) || "已安装（版本未知）" : "未安装"],
+          ].map(([label, value]) =>
+            h(
+              "div",
+              {
+                key: label,
+                style: {
+                  display: "grid",
+                  gridTemplateColumns: "84px 1fr",
+                  gap: 8,
+                  padding: "6px 0",
+                  borderBottom: "1px solid rgba(128,128,128,0.16)",
+                },
+              },
+              h(Text, { type: "secondary" }, label),
+              h("div", { style: { wordBreak: "break-all" } }, value),
+            ),
+          ),
+          h(
+            "div",
+            { style: { marginTop: 16, display: "flex", gap: 8 } },
+            actionButton(detail),
+            h(
+              Button,
+              {
+                size: "small",
+                onClick: () => {
+                  if (!navigator.clipboard) return;
+                  navigator.clipboard.writeText(detail.slug).catch(() => {});
+                },
+              },
+              "复制标识",
+            ),
+          ),
+        )
+      : null;
+
+    const detailHost = !detail
+      ? null
+      : Drawer
+        ? h(
+            Drawer,
+            {
+              open: true,
+              width: 420,
+              title: detail.name,
+              onClose: () => setDetail(null),
+            },
+            detailBody,
+          )
+        : Modal
+          ? h(
+              Modal,
+              {
+                open: true,
+                width: 520,
+                title: detail.name,
+                footer: null,
+                onCancel: () => setDetail(null),
+              },
+              detailBody,
+            )
+          : null;
 
     return h(
       "div",
       { style: { display: "flex", flexDirection: "column", gap: 12 } },
       h(
-        Space,
-        null,
+        "div",
+        { style: { display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center" } },
         Input
           ? h(Input, {
-              placeholder: "搜索技能名或标识符",
-              value: query,
+              placeholder: searchPlaceholder,
+              value: catalogue.query,
               allowClear: true,
               style: { width: 260 },
-              onChange: (event) => setQuery(event.target.value),
-              onPressEnter: () => load(query),
+              onChange: (event) => catalogue.setQuery(event.target.value),
             })
           : null,
-        h(Button, { onClick: () => load(query) }, "搜索"),
-        h(Button, { onClick: () => load("") }, "全部"),
-        installer.task
-          ? h(Button, { danger: true, onClick: installer.cancel }, "取消安装")
-          : null,
+        sortControl,
+        viewControl,
+        h(
+          Text,
+          { type: "secondary" },
+          `共 ${catalogue.total} 个${
+            catalogue.appliedQuery ? `（匹配“${catalogue.appliedQuery}”）` : ""
+          }`,
+        ),
+        catalogue.loading ? h(Spin, { size: "small" }) : null,
+        h(Button, { size: "small", onClick: catalogue.retry }, "刷新"),
       ),
-      loading
-        ? h(Spin)
-        : Table
-          ? h(Table, {
+      catalogue.error
+        ? h(Alert, {
+            type: "error",
+            showIcon: true,
+            message: "列表加载失败",
+            description: catalogue.error,
+            action: h(Button, { size: "small", onClick: catalogue.retry }, "重试"),
+          })
+        : null,
+      !catalogue.loading && !catalogue.items.length
+        ? h(Empty, { description: catalogue.error ? "加载失败，请重试" : emptyText })
+        : catalogue.view === "card" || !Table
+          ? cardGrid()
+          : h(Table, {
               rowKey: "slug",
               size: "small",
               pagination: false,
-              dataSource: items,
+              dataSource: catalogue.items,
               columns,
-              locale: { emptyText: h(Empty, { description: "还没有技能" }) },
-            })
-          : h(
-              "div",
-              null,
-              items.map((item) => h(Card, { key: item.slug, size: "small" }, item.name)),
+              onRow: (row) => ({ onClick: () => setDetail(row), style: { cursor: "pointer" } }),
+              locale: { emptyText: h(Empty, { description: emptyText }) },
+            }),
+      h(
+        "div",
+        { ref: sentinel, style: { textAlign: "center", padding: "4px 0" } },
+        catalogue.loadingMore
+          ? h(Spin, { size: "small" })
+          : catalogue.hasMore
+            ? h(Button, { size: "small", onClick: catalogue.loadMore }, "加载更多")
+            : catalogue.items.length
+              ? h(Text, { type: "secondary" }, "已经到底了")
+              : null,
+      ),
+      detailHost,
+    );
+  }
+
+
+  function MarketTab({ limits, onNotice, refreshToken, tenant, onInstalled }) {
+    const catalogue = useCatalogue({ kind: "skills", refreshToken, onNotice });
+    const [installed, markInstalled, installedVersions] = useInstalledSlugs(catalogue.items);
+    // Local to the list: notify the page, and remember the row just installed
+    // so it turns 已安装 immediately instead of after a reload.
+    const onInstallDone = useCallback(
+      (notice) => {
+        onNotice(notice);
+        if (notice && notice.type === "success" && notice.slug) {
+          markInstalled(notice.slug);
+          // The 已安装 tab stays mounted after its first visit, so it only
+          // reloads when the page bumps its token. Installing without this
+          // left a stale list behind.
+          if (onInstalled) onInstalled(notice.slug);
+        }
+      },
+      [onNotice, markInstalled, onInstalled],
+    );
+    const installer = useInstaller(onInstallDone);
+
+    return h(
+      "div",
+      { style: { display: "flex", flexDirection: "column", gap: 12 } },
+      installer.task
+        ? h(Alert, {
+            type: "info",
+            showIcon: true,
+            message: `正在安装 ${installer.busySlug}（${installer.task.status}）`,
+            action: h(
+              Button,
+              { size: "small", danger: true, onClick: installer.cancel },
+              "取消安装",
             ),
+          })
+        : null,
+      h(CatalogueView, {
+        kind: "skills",
+        tenant,
+        catalogue,
+        installed,
+        installedVersions,
+        busySlug: installer.busySlug,
+        onInstall: (row) => installer.install(row),
+        emptyText: "还没有技能",
+        searchPlaceholder: "搜索技能名或标识符",
+      }),
     );
   }
 
@@ -1310,10 +1875,16 @@ whenHost((paw) => {
     );
   }
 
-  function AgentMarketTab({ tenant, installed, markInstalled, onNotice, refreshToken }) {
-    const [items, setItems] = useState([]);
-    const [query, setQuery] = useState("");
-    const [loading, setLoading] = useState(false);
+  function AgentMarketTab({
+    tenant,
+    installed,
+    installedVersions,
+    markInstalled,
+    onNotice,
+    refreshToken,
+    onInstalled,
+  }) {
+    const catalogue = useCatalogue({ kind: "agents", refreshToken, onNotice });
     const [target, setTarget] = useState(null);
     const [targetName, setTargetName] = useState("");
     const [installVersion, setInstallVersion] = useState("latest");
@@ -1321,35 +1892,6 @@ whenHost((paw) => {
     const [installStep, setInstallStep] = useState("");
     const [installError, setInstallError] = useState(null);
     const [installResult, setInstallResult] = useState(null);
-
-    const load = useCallback(
-      async (value) => {
-        setLoading(true);
-        logger.debug(`智能体市场加载 q=${JSON.stringify(value || "")}`);
-        try {
-          const body = await getJson(
-            `/offline-market/agents?q=${encodeURIComponent(value || "")}&limit=50`,
-          );
-          const next = body.items || [];
-          setItems(next);
-          logger.debug(
-            `智能体市场 ${next.length} 条`,
-            next.map((item) => `${item.slug}@${item.latest_version || "-"}`),
-          );
-        } catch (err) {
-          logger.error("智能体市场加载失败", err);
-          onNotice({ type: "error", text: err.message });
-          setItems([]);
-        } finally {
-          setLoading(false);
-        }
-      },
-      [onNotice],
-    );
-
-    useEffect(() => {
-      load(query);
-    }, [load, refreshToken]);
 
     useEffect(() => {
       if (!installing) return undefined;
@@ -1401,7 +1943,8 @@ whenHost((paw) => {
           },
         );
         logger.info(`智能体安装完成 ${target.slug}（${Date.now() - started}ms）`, body);
-        markInstalled(target.slug);
+        markInstalled(target.slug, body.version);
+        if (onInstalled) onInstalled(target.slug);
         setInstallResult(body);
         onNotice({
           type: "success",
@@ -1414,111 +1957,22 @@ whenHost((paw) => {
         setInstalling(false);
         setInstallStep("");
       }
-    }, [target, targetName, installVersion, markInstalled, onNotice]);
-
-    const columns = useMemo(
-      () => [
-        {
-          title: "智能体",
-          dataIndex: "name",
-          render: (_, row) =>
-            h(
-              "div",
-              null,
-              h("div", null, h(Text, { strong: true }, row.name)),
-              h(
-                Text,
-                { type: "secondary", code: true },
-                `${row.slug}@${row.latest_version || "-"}`,
-              ),
-            ),
-        },
-        {
-          title: "描述",
-          dataIndex: "description",
-          ellipsis: true,
-          render: (value) => value || h(Text, { type: "secondary" }, "—"),
-        },
-        {
-          title: "可见性",
-          dataIndex: "visibility",
-          width: 110,
-          render: (value) =>
-            h(
-              Tag,
-              { color: value === "public" ? "blue" : "gold" },
-              VISIBILITY_LABEL[value] || value,
-            ),
-        },
-        {
-          title: "发布者",
-          dataIndex: "owner_name",
-          width: 160,
-          render: (_, row) => {
-            const label = row.owner_name || row.owner_tenant || "-";
-            const mine = Boolean(tenant) && row.owner_tenant === tenant;
-            return h("span", { title: row.owner_tenant || "" }, mine ? `${label}（我）` : label);
-          },
-        },
-        { title: "技能", dataIndex: "skill_count", width: 70 },
-        { title: "版本数", dataIndex: "versions", width: 80 },
-        {
-          title: "操作",
-          width: 150,
-          render: (_, row) =>
-            installed.has(row.slug)
-              ? h(Button, { size: "small", disabled: true }, "已安装")
-              : h(
-                  Button,
-                  {
-                    type: "primary",
-                    size: "small",
-                    disabled: installing,
-                    loading: installing && target && target.slug === row.slug,
-                    onClick: () => openInstall(row),
-                  },
-                  "安装",
-                ),
-        },
-      ],
-      [installed, installing, target, openInstall],
-    );
+    }, [target, targetName, installVersion, markInstalled, onNotice, onInstalled]);
 
     return h(
       "div",
       { style: { display: "flex", flexDirection: "column", gap: 12 } },
-      h(
-        Space,
-        null,
-        Input
-          ? h(Input, {
-              placeholder: "搜索智能体名或标识符",
-              value: query,
-              allowClear: true,
-              style: { width: 260 },
-              onChange: (event) => setQuery(event.target.value),
-              onPressEnter: () => load(query),
-            })
-          : null,
-        h(Button, { onClick: () => load(query) }, "搜索"),
-        h(Button, { onClick: () => load("") }, "全部"),
-      ),
-      loading
-        ? h(Spin)
-        : Table
-          ? h(Table, {
-              rowKey: "slug",
-              size: "small",
-              pagination: false,
-              dataSource: items,
-              columns,
-              locale: { emptyText: h(Empty, { description: "还没有智能体" }) },
-            })
-          : h(
-              "div",
-              null,
-              items.map((item) => h(Card, { key: item.slug, size: "small" }, item.name)),
-            ),
+      h(CatalogueView, {
+        kind: "agents",
+        tenant,
+        catalogue,
+        installed,
+        installedVersions,
+        busySlug: installing && target ? target.slug : "",
+        onInstall: openInstall,
+        emptyText: "还没有智能体",
+        searchPlaceholder: "搜索智能体名或标识符",
+      }),
       h(AgentInstallDialog, {
         target,
         name: targetName,
@@ -2013,17 +2467,23 @@ whenHost((paw) => {
     const [marketToken, setMarketToken] = useState(0);
     const [revision, setRevision] = useState(0);
     const [installed, setInstalled] = useState(() => new Set());
+    const [installedVersions, setInstalledVersions] = useState(() => ({}));
 
     const loadInstalled = useCallback(async () => {
       try {
         const body = await getJson("/offline-market/agents/installed");
-        const next = new Set(
-          (body.items || []).map((item) => item.slug).filter((slug) => Boolean(slug)),
-        );
+        const next = new Set();
+        const versions = {};
+        (body.items || []).forEach((item) => {
+          if (!item.slug) return;
+          next.add(item.slug);
+          if (item.version) versions[item.slug] = String(item.version);
+        });
         setInstalled(next);
+        setInstalledVersions(versions);
         logger.debug(`智能体已安装集合 ${next.size} 个`, [...next]);
       } catch (err) {
-        logger.warn("智能体已安装集合加载失败（安装按钮照常可用）", err);
+        logger.warn("智能体已安装集合加载失败（安装按钮照常可点）", err);
       }
     }, []);
 
@@ -2031,16 +2491,29 @@ whenHost((paw) => {
       loadInstalled();
     }, [loadInstalled, revision]);
 
-    const markInstalled = useCallback((slug) => {
+    const markInstalled = useCallback((slug, version) => {
       if (!slug) return;
       setInstalled((previous) => {
         if (previous.has(slug)) return previous;
         return new Set(previous).add(slug);
       });
+      if (version) {
+        setInstalledVersions((previous) =>
+          previous[slug] === String(version)
+            ? previous
+            : { ...previous, [slug]: String(version) },
+        );
+      }
     }, []);
 
     const onPublished = useCallback(() => {
       setMarketToken((value) => value + 1);
+    }, []);
+
+    // Installing an agent changes both the 已安装 tab and the local installed
+    // set; bump the revision so the tab reloads instead of staying stale.
+    const onAgentInstalled = useCallback(() => {
+      setRevision((value) => value + 1);
     }, []);
 
     const onUninstalled = useCallback((slug) => {
@@ -2052,6 +2525,12 @@ whenHost((paw) => {
         next.delete(slug);
         return next;
       });
+      setInstalledVersions((previous) => {
+        if (!previous[slug]) return previous;
+        const next = { ...previous };
+        delete next[slug];
+        return next;
+      });
     }, []);
 
     const tabs = [
@@ -2061,9 +2540,11 @@ whenHost((paw) => {
         children: h(AgentMarketTab, {
           tenant: (config && config.tenant) || "",
           installed,
+          installedVersions,
           markInstalled,
           onNotice,
           refreshToken: marketToken,
+          onInstalled: onAgentInstalled,
         }),
       },
       {
@@ -2095,7 +2576,7 @@ whenHost((paw) => {
         showIcon: true,
         message: "智能体安装会在本机新建一个独立智能体",
         description:
-          "人设与配置来自市场，捆绑技能仍由 QwenPaw 宿主扫描安装。卸载只摘除配置，不删除工作区。",
+          "人设与配置来自市场；捆绑技能仍由 QwenPaw 宿主扫描安装。卸载只摘除配置，不删除工作区。",
       }),
       Tabs
         ? h(Tabs, { items: tabs, defaultActiveKey: "market" })
@@ -2116,6 +2597,12 @@ whenHost((paw) => {
       setMarketToken((value) => value + 1);
     }, []);
 
+    // Installing a skill changes the 已安装 tab only; the market list keeps its
+    // scroll position and marks the row locally.
+    const onInstalled = useCallback(() => {
+      setRefreshToken((value) => value + 1);
+    }, []);
+
     const tabs = [
       {
         key: "market",
@@ -2125,6 +2612,7 @@ whenHost((paw) => {
           onNotice,
           refreshToken: marketToken,
           tenant: (config && config.tenant) || "",
+          onInstalled,
         }),
       },
       {
@@ -2334,25 +2822,16 @@ whenHost((paw) => {
     const monthTotal = Number(totals.new_this_month) || monthSkill + monthAgent;
     const downloadTotal = Number(totals.downloads) || 0;
 
-    const palette = {
-      ink: "#0f172a",
-      muted: "#64748b",
-      faint: "#94a3b8",
-      line: "#e2e8f0",
-      skills: "#6366f1",
-      agents: "#14b8a6",
-      downloads: "#0ea5e9",
-      fresh: "#f59e0b",
-    };
-
+    const theme = useMarketTheme();
+    const palette = theme.palette;
     const cardStyle = {
       position: "relative",
       overflow: "hidden",
       padding: 22,
       borderRadius: 18,
-      background: "#ffffff",
-      border: "1px solid rgba(148, 163, 184, 0.18)",
-      boxShadow: "0 10px 30px rgba(15, 23, 42, 0.06)",
+      background: palette.surface,
+      border: palette.border,
+      boxShadow: palette.shadow,
     };
 
     const hero = h(
@@ -2465,7 +2944,7 @@ whenHost((paw) => {
               display: "grid",
               placeItems: "center",
               borderRadius: 18,
-              background: "#ffffff",
+              background: palette.surface,
               border: "1px solid rgba(148, 163, 184, 0.18)",
             },
           },
@@ -2482,7 +2961,9 @@ whenHost((paw) => {
         hint: "个可安装技能",
         icon: "skills",
         accent: palette.skills,
-        soft: "linear-gradient(135deg, #eef2ff, #e0e7ff)",
+        soft: theme.dark
+          ? "linear-gradient(135deg, rgba(99, 102, 241, 0.28), rgba(99, 102, 241, 0.10))"
+          : "linear-gradient(135deg, #eef2ff, #e0e7ff)",
       },
       {
         key: "agents",
@@ -2491,7 +2972,9 @@ whenHost((paw) => {
         hint: "个可安装智能体",
         icon: "agents",
         accent: palette.agents,
-        soft: "linear-gradient(135deg, #ecfdf5, #ccfbf1)",
+        soft: theme.dark
+          ? "linear-gradient(135deg, rgba(20, 184, 166, 0.28), rgba(20, 184, 166, 0.10))"
+          : "linear-gradient(135deg, #ecfdf5, #ccfbf1)",
       },
       {
         key: "downloads",
@@ -2500,7 +2983,9 @@ whenHost((paw) => {
         hint: "次成功取包",
         icon: "downloads",
         accent: palette.downloads,
-        soft: "linear-gradient(135deg, #eff6ff, #dbeafe)",
+        soft: theme.dark
+          ? "linear-gradient(135deg, rgba(14, 165, 233, 0.28), rgba(14, 165, 233, 0.10))"
+          : "linear-gradient(135deg, #eff6ff, #dbeafe)",
       },
       {
         key: "new",
@@ -2509,7 +2994,9 @@ whenHost((paw) => {
         hint: "个新内容",
         icon: "new",
         accent: palette.fresh,
-        soft: "linear-gradient(135deg, #fffbeb, #fef3c7)",
+        soft: theme.dark
+          ? "linear-gradient(135deg, rgba(245, 158, 11, 0.30), rgba(245, 158, 11, 0.10))"
+          : "linear-gradient(135deg, #fffbeb, #fef3c7)",
       },
     ];
 
@@ -2584,7 +3071,7 @@ whenHost((paw) => {
           "div",
           { style: { display: "flex", alignItems: "center", gap: 9 } },
           h("span", { style: { width: 9, height: 9, borderRadius: 3, background: color } }),
-          h("span", { style: { fontSize: 13, color: "#334155", fontWeight: 600 } }, label),
+          h("span", { style: { fontSize: 13, color: palette.ink, fontWeight: 600 } }, label),
         ),
         h(
           "div",
@@ -2602,7 +3089,7 @@ whenHost((paw) => {
         h(
           "div",
           { style: { display: "flex", alignItems: "baseline", justifyContent: "space-between", marginBottom: 7 } },
-          h("span", { style: { fontSize: 13, fontWeight: 600, color: "#334155" } }, label),
+          h("span", { style: { fontSize: 13, fontWeight: 600, color: palette.ink } }, label),
           h(
             "span",
             { style: { fontSize: 12, color: palette.faint } },
@@ -2611,7 +3098,7 @@ whenHost((paw) => {
         ),
         h(
           "div",
-          { style: { height: 8, borderRadius: 999, background: "#f1f5f9", overflow: "hidden" } },
+          { style: { height: 8, borderRadius: 999, background: palette.surfaceAlt, overflow: "hidden" } },
           h("div", {
             style: {
               height: "100%",
@@ -2647,10 +3134,12 @@ whenHost((paw) => {
               borderRadius: "50%",
               background: itemTotal
                 ? `conic-gradient(${palette.skills} 0 ${skillPct}%, ${palette.agents} ${skillPct}% 100%)`
-                : "#e2e8f0",
+                : palette.line,
               display: "grid",
               placeItems: "center",
-              boxShadow: "inset 0 0 0 1px rgba(15, 23, 42, 0.04)",
+              boxShadow: theme.dark
+            ? "inset 0 0 0 1px rgba(255, 255, 255, 0.08)"
+            : "inset 0 0 0 1px rgba(15, 23, 42, 0.04)",
             },
           },
           h(
@@ -2660,7 +3149,7 @@ whenHost((paw) => {
                 width: 108,
                 height: 108,
                 borderRadius: "50%",
-                background: "#ffffff",
+                background: palette.surface,
                 display: "flex",
                 flexDirection: "column",
                 alignItems: "center",
@@ -2729,9 +3218,11 @@ whenHost((paw) => {
               borderRadius: 999,
               fontSize: 12,
               fontWeight: 700,
-              color: "#b45309",
-              background: "#fffbeb",
-              border: "1px solid #fde68a",
+              color: theme.dark ? "#fbbf24" : "#b45309",
+              background: theme.dark ? "rgba(245, 158, 11, 0.14)" : "#fffbeb",
+              border: theme.dark
+                ? "1px solid rgba(245, 158, 11, 0.45)"
+                : "1px solid #fde68a",
             },
           },
           `+${formatNumber(monthTotal)}`,
@@ -2777,7 +3268,7 @@ whenHost((paw) => {
         {
           style: {
             display: "grid",
-            gridTemplateColumns: "repeat(auto-fit, minmax(210px, 1fr))",
+            gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 210px), 1fr))",
             gap: 16,
           },
         },
@@ -2788,7 +3279,7 @@ whenHost((paw) => {
         {
           style: {
             display: "grid",
-            gridTemplateColumns: "repeat(auto-fit, minmax(300px, 1fr))",
+            gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 300px), 1fr))",
             gap: 16,
             alignItems: "stretch",
           },

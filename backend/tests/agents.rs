@@ -16,6 +16,7 @@ use tower::ServiceExt;
 
 struct Harness {
     app: Router,
+    state: offline_market_backend::state::Shared,
 }
 
 const GOOD_SKILL: &str = "---\nname: demo-skill\ndescription: a demo skill\n---\n\n# hello\n";
@@ -66,7 +67,10 @@ impl Harness {
         let conn = db::open_memory().expect("in-memory db");
         let state = build_state(cfg, conn);
         offline_market_backend::admin::ensure_admin(&state);
-        Self { app: router(state) }
+        Self {
+            app: router(state.clone()),
+            state,
+        }
     }
 
     async fn call(
@@ -698,4 +702,95 @@ async fn dashboard_counts_agents_and_their_downloads() {
     assert_eq!(stats["skills"]["total"], 0);
     assert_eq!(stats["totals"]["agents"], 1);
     assert_eq!(stats["totals"]["downloads"], 3);
+}
+
+#[tokio::test]
+async fn agent_listing_reports_totals_and_whitelisted_sort_orders() {
+    let h = Harness::new();
+    for slug in ["alpha-agent", "beta-agent", "gamma-agent"] {
+        let (status, body) = h.publish_agent("tenant-a", slug, "1.0.0", "public").await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+    }
+
+    for _ in 0..2 {
+        let (status, _, _) = h
+            .call(
+                "GET",
+                "/api/v1/agents/beta-agent/latest/bundle",
+                Some("tenant-b"),
+                None,
+                None,
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK);
+    }
+    let (status, _, _) = h
+        .call(
+            "GET",
+            "/api/v1/agents/gamma-agent/latest/bundle",
+            Some("tenant-b"),
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, listing, _) = h
+        .call(
+            "GET",
+            "/api/v1/agents?limit=1&sort=downloads",
+            Some("tenant-b"),
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{listing}");
+    assert_eq!(listing["total"], 3);
+    assert_eq!(listing["sort"], "downloads");
+    assert_eq!(listing["items"].as_array().unwrap().len(), 1);
+    assert_eq!(listing["items"][0]["slug"], "beta-agent");
+    assert_eq!(listing["items"][0]["download_count"], 2);
+
+    let (_, second, _) = h
+        .call(
+            "GET",
+            "/api/v1/agents?limit=1&page=2&sort=downloads",
+            Some("tenant-b"),
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(second["items"][0]["slug"], "gamma-agent");
+    assert_eq!(second["items"][0]["download_count"], 1);
+
+    h.state
+        .db()
+        .execute(
+            "UPDATE agent_versions SET created_at = 4102444800 WHERE slug = 'alpha-agent'",
+            [],
+        )
+        .unwrap();
+    let (_, updated, _) = h
+        .call(
+            "GET",
+            "/api/v1/agents?sort=updated&limit=50",
+            Some("tenant-b"),
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(updated["sort"], "updated");
+    assert_eq!(updated["items"][0]["slug"], "alpha-agent");
+
+    let (_, fallback, _) = h
+        .call(
+            "GET",
+            "/api/v1/agents?sort=DROP%20TABLE",
+            Some("tenant-b"),
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(fallback["total"], 3);
+    assert_eq!(fallback["sort"], "created");
 }

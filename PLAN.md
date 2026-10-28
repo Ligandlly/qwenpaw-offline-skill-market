@@ -102,6 +102,11 @@
   - 侧边栏「内网市场」（技能页签），`primary.agentScoped`、紧跟内置 `core.marketplace`
   - 四个页签：市场（搜索/表格/安装+取消）、发布（zip 压缩包上传+限额预检）、我的发布（撤回/恢复）、已安装（市场状态徽标）
   - 验证脚本 `spikes/m3_verify.py`：菜单/四个页签/UI 安装到完成/UI 发布/我的发布/管理员下架后「已安装」显示已下架，**0 console & page error**
+  - **v0.1.5 目录升级（P0+P1）**：技能与智能体列表共用 `useCatalogue`/`CatalogueView` —— 卡片/列表双视图、300ms 防抖搜索、`created|downloads|updated` 排序、详情抽屉、已安装 vs 市场版本「可更新」徽标、`IntersectionObserver` 滚动加载、antd token 主题适配；后端列表随之返回 `total/download_count/updated_at/sort`（`backend/src/api.rs`、`backend/src/agents.rs`，`sort` 白名单归一，`downloads` 用已有列、`updated` 用 `MAX(version.created_at)`）
+  - **v0.1.6 修复**：技能/智能体安装成功后递增 `refreshToken`（`MarketTab`/`AgentMarketTab` 的 `onInstalled` →
+    `SkillsPage`/`AgentMarketPage`），已安装页不再停留在首次挂载时的快照；同时修正 `spikes/ui_smoke.mjs` 的
+    `pane()`（取最内层可见 tabpane）与安装状态 mock（`completed`），新增「安装后已安装页自动刷新」断言
+  - 无宿主环境的等价验证：`spikes/ui_smoke.mjs`（jsdom + 真 antd + 伪宿主，31 项断言）；`m3_verify.py` 增补目录交互与列表契约断言
   - 新发现（已修）：宿主技能列表 `source` 恒为 `customized`、`installed_from` 只在详情里、安装目录名是展示名而非 slug → 新增 `/api/v1/skills/lookup`
 - **M4** 离线 e2e + docker-compose / 裸二进制部署包 + 运维文档（含扫描模式：`block` 推荐，`warn` 允许）—— **已完成（智能体 Docker phase C 需在有 docker 权限的宿主机执行）**
 

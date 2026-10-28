@@ -28,7 +28,7 @@
   宿主 API 客户端（loopback 约束、内部 token/Authorization 转发、multipart 技能上传）、
   从现有 agent 的只读快照、安装状态机（创建→等就绪→写 MD→装技能→应用配置）、
   失败回滚、按 slug 并发锁、本机安装账本、卸载与对账。
-  插件测试 107 项全绿（新增 34：host 11 + agents 11 + routes 12），不联网、不需要宿主。
+  插件测试 108 项全绿（新增 34：host 11 + agents 11 + routes 12，另有 sort/total 透传用例），不联网、不需要宿主。
 - **M3 前端已落地**（`plugin/frontend/market.js`）：顶层「技能 / 智能体 / 概览」三个页签；
   智能体四页签（市场/发布/我的发布/已安装）、安装弹窗（阶段提示、失败 step、回滚/保留工作区）、
   发布预览（新增 `/api/offline-market/agents/preview`）、卸载确认。无构建步骤；
@@ -497,7 +497,7 @@ New Task 按钮正下方、折叠菜单之外；页面顶部三个一级页签�
   - `agents.py`：只读快照（五种 MD + 启用技能，跳过 symlink/`__pycache__`）、
     安装状态机、rollback、按 slug 并发锁、原子账本、卸载、对账
   - `routes.py`：市场代理、`/host-agents`、发布、安装、卸载、已安装
-- 测试：`pytest` 107 项全绿（新增 34：host 11 + agents 11 + routes 12）；
+- 测试：`pytest` 108 项全绿（新增 34：host 11 + agents 11 + routes 12）；
   `compileall` 通过；不联网、不需要 QwenPaw
 - 明确未做：前端页签（M3）；安装进度是同步请求，页面只能显示最终 `step`/回滚结果
 
@@ -518,7 +518,7 @@ New Task 按钮正下方、折叠菜单之外；页面顶部三个一级页签�
 - preflight：`--runtime-container` 增加容器内市场可达性 + 插件 `/host-health`
 - `docs/OPS.md` §2.6：Docker Hub 容器名、宿主 API 自调用、**ICC=false 导致不能用同网络
   容器名**（改用 bridge gateway）、工作区清理、验收命令
-- 验证：脚本 `py_compile` + 探针源码 `compile()`；插件 107 测试；无 Docker 权限，
+- 验证：脚本 `py_compile` + 探针源码 `compile()`；插件 108 测试；无 Docker 权限，
   phase C 未在当前环境真机执行
 
 ## 9. 未决（后续）

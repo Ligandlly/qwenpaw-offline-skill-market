@@ -5,10 +5,10 @@
 ## 1. 单元与集成测试
 
 ```bash
-# 后端：24 单测（闸门/slug/版本/智能体 manifest）+ 27 集成（隔离、不可变、下架语义、审计）
+# 后端：24 单测（闸门/slug/版本/智能体 manifest）+ 29 集成（隔离、不可变、下架语义、审计、列表 total/sort）
 cd backend && cargo test
 
-# 插件：107 测试（扫描闸门、provider 契约、错误透传、路由、智能体快照/安装/回滚、概览统计、不联网）
+# 插件：108 测试（扫描闸门、provider 契约、错误透传、路由 sort/total 透传、智能体快照/安装/回滚、概览统计、不联网）
 cd plugin && python -m pytest
 ```
 
@@ -64,9 +64,24 @@ python3 deploy/scripts/e2e.py --skip-a --skip-b \
 python3 spikes/m3_verify.py
 ```
 
-覆盖 9 项：侧边栏入口（名称/位置）、技能四页签、UI 点安装到完成、UI 上传 zip 发布、
-我的发布、已安装显示"正常"、管理员下架后显示"已下架"、智能体页签渲染、
-**0 console & page error**。
+覆盖 11 项：侧边栏入口（名称/位置）、技能四页签、UI 点安装到完成、**目录抽屉/排序/防抖搜索/列表视图**、
+**列表接口 total+sort+download_count+updated_at**、UI 上传 zip 发布、我的发布、已安装显示"正常"、
+管理员下架后显示"已下架"、智能体页签渲染、**0 console & page error**。
+
+> 该脚本需要真宿主（backend + qwenpaw app + chromium），本轮 UI 升级在无宿主环境下改用下面的无头渲染冒烟
+> 作为等价证据；部署环境仍须跑一遍 `m3_verify.py`。
+
+### 4b. 无头 UI 冒烟（无需 QwenPaw、无需浏览器）
+
+```bash
+npm install --prefix /tmp/harness react@18 react-dom@18 antd@5 jsdom   # 一次性
+node spikes/ui_smoke.mjs
+```
+
+用真实 `market.js` + 伪 `window.QwenPaw.host` + 伪插件 API 渲染整个市场页，覆盖 31 项：
+卡片视图与结果计数、`安装/更新` 徽标（1.0.0 → 1.2.0）、详情抽屉、触底加载第 2 页、
+300ms 防抖搜索、排序下拉改 `sort=downloads`、列表视图、502 错误态、智能体安装弹窗、
+安装后已安装页自动刷新、暗色主题重渲染，以及**正常流程 0 console error**。输出 `ALL CHECKS PASSED` 才算通过。
 
 ## 5. 部署自检（只读）
 
@@ -101,6 +116,6 @@ python3 deploy/scripts/preflight.py \
 | `plugin/offline_market/*` | `pytest` + `e2e.py` phase B |
 | `plugin/offline_market/{host,agents}.py` | `pytest`（快照/安装顺序/回滚/账本；不联网） |
 | `plugin/offline_market/routes.py` | `pytest` + preflight 的 `/host-health`（容器内） |
-| `plugin/frontend/market.js` | `node --check` + `m3_verify.py` |
+| `plugin/frontend/market.js` | `node --check` + `node spikes/ui_smoke.mjs` + `m3_verify.py` |
 | `deploy/*` | `preflight.py` + `e2e.py` |
 | `deploy/scripts/{e2e,preflight,runtime_probe}.py` | `py_compile` + Docker 宿主机跑 phase C |
