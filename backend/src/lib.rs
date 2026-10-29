@@ -43,6 +43,10 @@ pub fn router(app: Shared) -> Router {
         .route("/api/v1/skills", get(api::list_skills).post(api::publish))
         .route("/api/v1/skills/mine", get(api::list_mine))
         .route("/api/v1/skills/lookup", get(api::lookup_skills))
+        // Slug derivation for the publish page (Chinese names -> pinyin).
+        .route("/api/v1/slug", get(api::preview_slug))
+        // Dry run of a publish: the form shows every problem before submitting.
+        .route("/api/v1/skills/validate", post(api::validate))
         .route("/api/v1/skills/{slug}/status", get(api::skill_status))
         .route("/api/v1/skills/{slug}/withdraw", post(api::withdraw))
         .route("/api/v1/skills/{slug}/restore", post(api::restore))

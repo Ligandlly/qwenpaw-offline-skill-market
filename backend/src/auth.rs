@@ -43,7 +43,7 @@ impl<S: Send + Sync> FromRequestParts<S> for TenantId {
             return Err(ApiError::new(
                 StatusCode::UNAUTHORIZED,
                 "missing_tenant",
-                "X-Tenant-Id header is required (the plugin must forward QWENPAW_TENANT_ID)",
+                "缺少 X-Tenant-Id 请求头（插件需要转发 QWENPAW_TENANT_ID）",
             ));
         }
         let ok = raw.len() <= 128
@@ -54,7 +54,7 @@ impl<S: Send + Sync> FromRequestParts<S> for TenantId {
             return Err(ApiError::new(
                 StatusCode::BAD_REQUEST,
                 "invalid_tenant",
-                "X-Tenant-Id contains unsupported characters",
+                "X-Tenant-Id 含有不支持的字符",
             ));
         }
         Ok(TenantId(raw.to_string()))

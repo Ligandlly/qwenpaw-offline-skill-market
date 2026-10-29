@@ -851,3 +851,178 @@ async fn listing_reports_totals_and_whitelisted_sort_orders() {
     assert_eq!(fallback["total"], 3);
     assert_eq!(fallback["sort"], "created");
 }
+
+#[tokio::test]
+async fn chinese_names_derive_a_pinyin_slug_for_publish_and_preview() {
+    let h = Harness::new();
+    // GET /api/v1/slug is what the publish page calls to prefill 标识符.
+    let (status, body, _) = h
+        .call(
+            "GET",
+            "/api/v1/slug?name=%E5%91%A8%E6%8A%A5%E5%8A%A9%E6%89%8B",
+            Some("tenant-a"),
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["slug"], "zhoubaozhushou");
+
+    let (status, body, _) = h
+        .call(
+            "GET",
+            "/api/v1/slug?name=%21%21%21",
+            Some("tenant-a"),
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body["slug"].is_null(), "{body}");
+
+    // Publishing without a slug uses the same derivation.
+    let (status, body, _) = h
+        .call(
+            "POST",
+            "/api/v1/skills",
+            Some("tenant-a"),
+            Some(json!({
+                "name": "周报助手",
+                "version": "1.0.0",
+                "visibility": "public",
+                "files": { "SKILL.md": GOOD_MANIFEST }
+            })),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(body["slug"], "zhoubaozhushou");
+    assert_eq!(
+        body["install_url"],
+        "http://market.test/skills/zhoubaozhushou/1.0.0"
+    );
+}
+
+/// The publish form's dry run: one request tells the page everything that would
+/// make `POST /api/v1/skills` fail, and writes nothing.
+#[tokio::test]
+async fn validate_reports_every_problem_without_publishing() {
+    let h = Harness::new();
+    h.publish("tenant-a", "taken-id", "1.0.0", "public").await;
+
+    let (status, body, _) = h
+        .call(
+            "POST",
+            "/api/v1/skills/validate",
+            Some("tenant-a"),
+            Some(json!({
+                "name": "周报助手",
+                "version": "1.0.0",
+                "visibility": "public",
+                // no SKILL.md, a traversal entry, a bad visibility
+                "files": { "readme.md": "hello", "../evil.md": "x" }
+            })),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["ok"], false);
+    // Chinese name -> pinyin slug, so the form can show the install URL early.
+    assert_eq!(body["slug"], "zhoubaozhushou");
+    let codes: Vec<&str> = body["problems"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p["code"].as_str().unwrap())
+        .collect();
+    assert!(codes.contains(&"missing_manifest"), "{codes:?}");
+    assert!(codes.contains(&"traversal"), "{codes:?}");
+    assert!(
+        body["problems"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|p| p["message"]
+                .as_str()
+                .unwrap()
+                .chars()
+                .any(|c| c > '\u{2e80}')),
+        "已是中文文案：{body}"
+    );
+
+    // Nothing was written by the dry run.
+    let (_s, listing, _) = h
+        .call("GET", "/api/v1/skills", Some("tenant-a"), None, None)
+        .await;
+    assert!(!listing["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|i| i["slug"] == "zhoubaozhushou"));
+
+    // A good bundle passes, and the manifest is returned for the preview.
+    let (status, body, _) = h
+        .call(
+            "POST",
+            "/api/v1/skills/validate",
+            Some("tenant-a"),
+            Some(json!({
+                "name": "周报助手",
+                "version": "1.0.0",
+                "visibility": "tenant",
+                "files": { "SKILL.md": GOOD_MANIFEST }
+            })),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["ok"], true, "{body}");
+    assert_eq!(body["manifest"]["name"], "demo");
+    assert_eq!(body["manifest"]["description"], "a demo skill");
+    assert_eq!(body["file_count"], 1);
+    assert!(body["problems"].as_array().unwrap().is_empty());
+    assert!(body["existing"].is_null());
+    assert!(body["next_version"].is_null());
+    assert_eq!(body["limits"]["max_files"], 100);
+
+    // Re-publishing an existing slug@version is caught before uploading, and the
+    // next patch version is suggested.
+    let (status, body, _) = h
+        .call(
+            "POST",
+            "/api/v1/skills/validate",
+            Some("tenant-a"),
+            Some(json!({
+                "name": "Taken", "slug": "taken-id", "version": "1.0.0",
+                "visibility": "public",
+                "files": { "SKILL.md": GOOD_MANIFEST }
+            })),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["ok"], false);
+    assert_eq!(body["problems"][0]["code"], "version_exists");
+    assert_eq!(body["next_version"], "1.0.1");
+    assert_eq!(body["existing"]["latest_version"], "1.0.0");
+    assert_eq!(body["existing"]["mine"], true);
+
+    // Someone else's slug is a problem, not a 403 after the upload.
+    let (status, body, _) = h
+        .call(
+            "POST",
+            "/api/v1/skills/validate",
+            Some("tenant-b"),
+            Some(json!({
+                "name": "Taken", "slug": "taken-id", "version": "2.0.0",
+                "visibility": "public",
+                "files": { "SKILL.md": GOOD_MANIFEST }
+            })),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["problems"][0]["code"], "slug_taken");
+    assert_eq!(body["existing"]["mine"], false);
+    assert!(body["next_version"].is_null());
+}

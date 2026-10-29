@@ -198,6 +198,64 @@ def test_publish_zip_rejects_broken_archives_and_missing_fields(api, env, backen
     assert not backend.requests  # nothing ever reached the backend
 
 
+def test_inspect_reports_the_bundle_without_publishing(api, env, backend):
+    # The publish form previews a pick: same gate as a real publish, but the
+    # report comes back as data and nothing is created on the market.
+    backend.on(
+        "POST",
+        "/api/v1/skills/validate",
+        200,
+        {
+            "ok": True,
+            "slug": "zhoubaozhushou",
+            "manifest": {"name": "周报助手", "description": "weekly report"},
+            "file_count": 2,
+            "problems": [],
+        },
+    )
+    response = api.post(
+        "/offline-market/skills/inspect?name=%E5%91%A8%E6%8A%A5%E5%8A%A9%E6%89%8B&version=1.0.1",
+        content=make_zip(
+            {
+                "my-skill/SKILL.md": "---\nname: weekly\ndescription: x\n---\n",
+                "my-skill/a.md": "hi",
+            }
+        ),
+        headers={"content-type": "application/zip"},
+    )
+    assert response.status_code == 200
+    assert response.json()["manifest"]["name"] == "周报助手"
+    sent = backend.requests[-1]
+    assert sent["path"] == "/api/v1/skills/validate"
+    assert sent["body"]["name"] == "周报助手"
+    assert sent["body"]["files"] == {
+        "SKILL.md": "---\nname: weekly\ndescription: x\n---\n",
+        "a.md": "hi",
+    }
+
+
+def test_inspect_turns_a_broken_zip_into_a_report_not_an_error(api, env, backend):
+    # A bad pick must not blow up the form: it comes back as one problem row.
+    broken = api.post(
+        "/offline-market/skills/inspect?name=Demo&version=1.0.0",
+        content=b"not a zip",
+        headers={"content-type": "application/zip"},
+    )
+    assert broken.status_code == 200
+    body = broken.json()
+    assert body["ok"] is False
+    assert body["problems"][0]["code"] == "invalid_zip"
+    assert body["name"] == "Demo"
+
+    no_manifest = api.post(
+        "/offline-market/skills/inspect?name=Demo&version=1.0.0",
+        content=make_zip({"README.md": "hi"}),
+        headers={"content-type": "application/zip"},
+    ).json()
+    assert no_manifest["problems"][0]["code"] == "missing_manifest"
+    assert not backend.requests  # the market was never asked
+
+
 def test_publish_forwards_the_publisher_name_and_clamps_it(api, env, backend):
     backend.on("POST", "/api/v1/skills", 201, {"slug": "demo", "version": "1.0.0"})
     manifest = "---\nname: demo\ndescription: x\n---\n"
@@ -297,6 +355,17 @@ def test_lookup_forwards_display_names(api, env, backend):
     before = len(backend.requests)
     assert api.get("/offline-market/lookup?names=").json() == {"items": []}
     assert len(backend.requests) == before
+
+
+def test_derive_slug_prefills_the_identifier_with_pinyin(api, env, backend):
+    # The publish form asks the market instead of keeping its own pinyin table.
+    backend.on("GET", "/api/v1/slug", 200, {"name": "周报助手", "slug": "zhoubaozhushou"})
+    body = api.get("/offline-market/derive-slug?name=%E5%91%A8%E6%8A%A5%E5%8A%A9%E6%89%8B").json()
+    assert body["slug"] == "zhoubaozhushou"
+    assert backend.requests[-1]["path"] == (
+        "/api/v1/slug?name=%E5%91%A8%E6%8A%A5%E5%8A%A9%E6%89%8B"
+    )
+    assert backend.requests[-1]["headers"]["x-tenant-id"] == "tenant-a"
 
 
 def test_market_lists_forward_sort_and_return_total(api, env, backend):

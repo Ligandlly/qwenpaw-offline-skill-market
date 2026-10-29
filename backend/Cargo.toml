@@ -1,6 +1,6 @@
 [package]
 name = "offline-market-backend"
-version = "0.1.6"
+version = "0.1.7"
 edition = "2021"
 description = "Offline skill market backend for QwenPaw 2.2.2 hub tenants"
 license = "MIT"
@@ -15,6 +15,9 @@ sha2 = "0.10"
 base64ct = { version = "1", features = ["alloc"] }
 argon2 = "0.5"
 rand = "0.8"
+# Han -> plain pinyin for slug derivation (`周报助手` -> `zhoubaozhushou`).
+# Only the "plain" feature: no tone marks, no heteronym table.
+pinyin = { version = "0.11", default-features = false, features = ["plain"] }
 tracing = "0.1"
 # fmt only: no env-filter/regex, the level comes from MARKET_LOG (see config.rs)
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "std"] }

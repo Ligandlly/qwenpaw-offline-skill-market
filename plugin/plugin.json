@@ -1,6 +1,6 @@
 {
   "id": "offline-market",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "name": "Offline Market",
   "description": "Local skill & agent marketplace for air-gapped QwenPaw hubs: browse, install, publish.",
   "author": "platform",

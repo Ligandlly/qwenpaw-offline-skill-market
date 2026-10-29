@@ -13,11 +13,15 @@
  * or the host API directly.
  */
 const PLUGIN_ID = "offline-market";
-const PLUGIN_VERSION = "0.1.6"; // keep in sync with plugin.json
+const PLUGIN_VERSION = "0.1.7"; // keep in sync with plugin.json
 const PLUGIN_LABEL = "内网市场";
 const VISIBILITY_LABEL = { public: "公开", tenant: "仅本租户" };
 const STATE_LABEL = { active: "已上架", withdrawn: "已撤回", taken_down: "已下架" };
 const STATE_COLOR = { active: "green", withdrawn: "default", taken_down: "red" };
+// 卡片高度上限：描述最多两行（2 × 20px 行高），卡片整体再兜一层上限，
+// 避免超长描述把网格里的卡片撑得过长。
+const CARD_MAX_HEIGHT = 320;
+const DESC_MAX_HEIGHT = 40;
 const AGENT_STATE_LABEL = {
   active: "正常",
   withdrawn: "已撤回",
@@ -278,6 +282,22 @@ async function request(path, init) {
 }
 
 const getJson = (path) => request(path);
+
+/**
+ * `My Skill!` -> `my-skill`. Only a UI fallback for when the market cannot be
+ * asked: Chinese names give "" here and are left to the backend, which
+ * transliterates them to pinyin (`周报助手` -> `zhoubaozhushou`).
+ */
+function fallbackSlug(name) {
+  const slug = String(name || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 64)
+    .replace(/-+$/g, "");
+  return /^[a-z0-9]/.test(slug) ? slug : "";
+}
 const postJson = (path, payload) =>
   request(path, {
     method: "POST",
@@ -333,6 +353,9 @@ whenHost((paw) => {
   const Table = antd.Table;
   const Modal = antd.Modal;
   const Drawer = antd.Drawer;
+  const Steps = antd.Steps;
+  const Radio = antd.Radio;
+  const Tooltip = antd.Tooltip;
   const Empty = antd.Empty || (() => h("div", null, "暂无数据"));
   const Spin = antd.Spin || (() => h("div", null, "加载中…"));
   const Typography = antd.Typography || {};
@@ -996,7 +1019,8 @@ whenHost((paw) => {
               size: "small",
               hoverable: true,
               onClick: () => setDetail(row),
-              style: { cursor: "pointer" },
+              // 防御：卡片高度设上限，描述再长也不会把整张卡片撑开
+              style: { cursor: "pointer", maxHeight: CARD_MAX_HEIGHT, overflow: "hidden" },
             },
             h(
               "div",
@@ -1017,13 +1041,19 @@ whenHost((paw) => {
               Paragraph,
               {
                 type: "secondary",
+                // 行内省略依赖 -webkit-line-clamp，宿主 CSS 不一定保留该属性，
+                // 因此同时锁死高度（2 行 × 20px），任何情况下都不会撑高卡片。
+                title: row.description || "",
                 style: {
                   margin: "8px 0",
-                  minHeight: 40,
+                  lineHeight: "20px",
+                  height: DESC_MAX_HEIGHT,
+                  maxHeight: DESC_MAX_HEIGHT,
                   display: "-webkit-box",
                   WebkitLineClamp: 2,
                   WebkitBoxOrient: "vertical",
                   overflow: "hidden",
+                  wordBreak: "break-word",
                 },
               },
               row.description || "—",
@@ -1428,20 +1458,283 @@ whenHost((paw) => {
         : h("div", null, items.length, " 个技能");
   }
 
+  // ------------------------------------------------------ publish layout ---
+  // The publish form is the one screen a publisher stares at, so it borrows the
+  // host console's import flow instead of dumping inputs on a Card: a numbered
+  // 选择 → 确认 → 完成 progress, a drop zone, and a dry-run report from the
+  // market that lists every problem at once (the backend's own rules, no second
+  // copy of them here).
+
+  /** Numbered section head — same visual rhythm as the host's import pages. */
+  function FormSection({ index, title, hint, extra, palette }) {
+    return h(
+      "div",
+      { style: { display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" } },
+      h(
+        "span",
+        {
+          style: {
+            width: 22,
+            height: 22,
+            borderRadius: 7,
+            display: "inline-flex",
+            alignItems: "center",
+            justifyContent: "center",
+            background: palette.dark
+              ? "rgba(99, 102, 241, 0.24)"
+              : "rgba(99, 102, 241, 0.12)",
+            color: palette.skills,
+            fontSize: 12,
+            fontWeight: 600,
+          },
+        },
+        String(index),
+      ),
+      h("span", { style: { fontWeight: 600, color: palette.ink } }, title),
+      hint ? h("span", { style: { fontSize: 12, color: palette.faint } }, hint) : null,
+      h("span", { style: { flex: "1 1 40px" } }),
+      extra || null,
+    );
+  }
+
+  /** Label above control, hint below: the console's vertical form rhythm. */
+  function FormField({ label, hint, children, palette, grow }) {
+    return h(
+      "div",
+      {
+        style: {
+          display: "grid",
+          gap: 6,
+          flex: grow ? `${grow} 1 180px` : "1 1 180px",
+          minWidth: 160,
+        },
+      },
+      h("span", { style: { fontSize: 12, color: palette.muted } }, label),
+      children,
+      hint ? h("span", { style: { fontSize: 12, color: palette.faint } }, hint) : null,
+    );
+  }
+
+  /** Folder-with-arrow glyph; inline SVG keeps us free of an icon package. */
+  function ArchiveGlyph({ size = 26, color = "currentColor" }) {
+    return h(
+      "svg",
+      {
+        width: size,
+        height: size,
+        viewBox: "0 0 24 24",
+        fill: "none",
+        stroke: color,
+        strokeWidth: 1.6,
+        strokeLinecap: "round",
+        strokeLinejoin: "round",
+        "aria-hidden": "true",
+      },
+      h("path", { d: "M12 16V8" }),
+      h("path", { d: "M8.5 11.5 12 8l3.5 3.5" }),
+      h("path", { d: "M20 16.5A3.5 3.5 0 0 0 17.5 10h-1.1A5.5 5.5 0 1 0 6 14.8" }),
+    );
+  }
+
+  /**
+   * Drop zone that also works with a click. Wraps a hidden `<input type=file>`
+   * (the host's own SkillPool does the same) plus drag handlers, so a publisher
+   * can either drag a `.zip` from the desktop or browse for it.
+   */
+  function PackageDropZone({
+    archive,
+    dragging,
+    disabled,
+    onDragOver,
+    onDragLeave,
+    onDrop,
+    onPick,
+    onClear,
+    palette,
+    limits,
+  }) {
+    const inputRef = useRef(null);
+    const open = useCallback(() => {
+      if (!disabled && inputRef.current) inputRef.current.click();
+    }, [disabled]);
+    return h(
+      "div",
+      {
+        role: "button",
+        tabIndex: disabled ? -1 : 0,
+        "aria-label": "选择或拖入技能压缩包",
+        onClick: open,
+        onKeyDown: (event) => {
+          if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            open();
+          }
+        },
+        onDragOver: (event) => {
+          event.preventDefault();
+          if (!disabled) onDragOver(event);
+        },
+        onDragLeave,
+        onDrop,
+        style: {
+          display: "grid",
+          justifyItems: "center",
+          gap: 6,
+          padding: "24px 16px",
+          borderRadius: 12,
+          textAlign: "center",
+          cursor: disabled ? "not-allowed" : "pointer",
+          background: dragging
+            ? palette.dark
+              ? "rgba(99, 102, 241, 0.18)"
+              : "rgba(99, 102, 241, 0.06)"
+            : palette.surfaceAlt,
+          border: dragging ? `1px dashed ${palette.skills}` : `1px dashed ${palette.line}`,
+          transition: "background 120ms ease, border-color 120ms ease",
+        },
+      },
+      h("input", {
+        ref: inputRef,
+        type: "file",
+        accept: ".zip,application/zip,application/x-zip-compressed",
+        style: { display: "none" },
+        onChange: onPick,
+        disabled,
+      }),
+      h(ArchiveGlyph, { color: archive ? palette.skills : palette.faint }),
+      h(
+        "span",
+        { style: { color: palette.ink, fontWeight: 500 } },
+        archive ? archive.name : "点击选择或把 .zip 拖到这里",
+      ),
+      h(
+        "span",
+        { style: { fontSize: 12, color: palette.faint } },
+        archive
+          ? `${formatBytes(archive.bytes.byteLength)} · 点这里换一个包`
+          : "根目录（或压缩包里唯一的顶层目录）必须包含 SKILL.md",
+      ),
+      archive
+        ? h(
+            Button,
+            {
+              size: "small",
+              type: "link",
+              style: { padding: 0, height: "auto" },
+              onClick: (event) => {
+                event.stopPropagation();
+                onClear();
+              },
+            },
+            "移除这个包",
+          )
+        : null,
+      limits && !archive
+        ? h(
+            "span",
+            { style: { fontSize: 12, color: palette.faint } },
+            `限额 ${limits.max_files} 个文件 / 单文件 ${formatBytes(limits.max_file_bytes)} / 合计 ${formatBytes(
+              limits.max_bundle_bytes,
+            )}`,
+          )
+        : null,
+    );
+  }
+
+  /** `Input` + trailing button; antd 5 deprecates `addonAfter` for this. */
+  function withAddon(control, addon) {
+    if (!control || !addon) return control;
+    if (Space && Space.Compact) {
+      return h(Space.Compact, { style: { width: "100%" } }, control, addon);
+    }
+    return h("div", { style: { display: "flex", gap: 6 } }, control, addon);
+  }
+
+  /** One read-only fact from the dry run (file count, size, …). */
+  function ReportStat({ label, value, palette }) {
+    return h(
+      "div",
+      {
+        style: {
+          display: "grid",
+          gap: 2,
+          padding: "8px 10px",
+          borderRadius: 10,
+          background: palette.surfaceAlt,
+          border: palette.border,
+          minWidth: 96,
+        },
+      },
+      h("span", { style: { fontSize: 12, color: palette.faint } }, label),
+      h("span", { style: { color: palette.ink, fontVariantNumeric: "tabular-nums" } }, value),
+    );
+  }
+
   function PublishTab({ limits, onNotice, onPublished }) {
+    const { palette } = useMarketTheme();
     const [name, setName] = useState("");
     const [slug, setSlug] = useState("");
+    // 手改过的标识符不再自动覆盖：有人故意把同一个 id 复用到新包上。
+    const slugEdited = useRef(false);
     const [version, setVersion] = useState("1.0.0");
     const [visibility, setVisibility] = useState("public");
     const [archive, setArchive] = useState(null);
+    // 试运行报告：问题清单、manifest、文件体积、建议版本都从这里来。
+    const [report, setReport] = useState(null);
+    const [inspecting, setInspecting] = useState(false);
+    // 试运行本身失败（市场不可达、插件版本太旧…）也要看得见：静默失败会让人
+    // 以为「选完包什么也没发生」。
+    const [inspectError, setInspectError] = useState(null);
     const [fileError, setFileError] = useState(null);
+    const [dragging, setDragging] = useState(false);
     const [busy, setBusy] = useState(false);
+    const [result, setResult] = useState(null);
     const publisherName = useCurrentUserName();
+    const derivedName = useDebounced(name, 300);
+    const stableSlug = useDebounced(slug, 500);
+    const stableVersion = useDebounced(version, 600);
+    // 每次选包都递增：同名包再选一次也要重推一遍（防抖不会自己重跑）。
+    const [pickRevision, setPickRevision] = useState(0);
+    // 试运行是异步的：只认最后一次请求的回答。
+    const inspectSeq = useRef(0);
+    // 同一份表单 + 同一个包只干跑一次：重复的请求只会多解一次 zip。
+    const lastInspect = useRef("");
 
-    const onPick = useCallback(async (event) => {
-      const picked = (event.target.files || [])[0];
-      event.target.value = ""; // allow picking the same file again
+    /**
+     * 标识符跟着名称走：换一个压缩包就换一次名称，标识符随之重新推导（不是
+     * 只第一次填）。规则在后端（`/offline-market/derive-slug`）：中文名转拼音，
+     * 英文名做同样的归一化，所以页面不用再维护第二份规则。
+     */
+    useEffect(() => {
+      if (slugEdited.current) return;
+      const wanted = derivedName.trim();
+      if (!wanted) {
+        setSlug("");
+        return;
+      }
+      let cancelled = false;
+      getJson(`/offline-market/derive-slug?name=${encodeURIComponent(wanted)}`)
+        .then((body) => {
+          if (cancelled || slugEdited.current) return;
+          setSlug((body && body.slug) || "");
+        })
+        .catch((err) => {
+          if (cancelled || slugEdited.current) return;
+          // 市场不可达时退回本地 ASCII 规则；中文名留空，发布时后端仍会推。
+          setSlug(fallbackSlug(wanted));
+          logger.warn(`标识符推导失败，退回本地规则：${wanted}`, err);
+        });
+      return () => {
+        cancelled = true;
+      };
+    }, [derivedName, pickRevision]);
+
+    const takeFile = useCallback(async (picked) => {
       if (!picked) return;
+      if (!/\.zip$/i.test(picked.name || "")) {
+        setFileError("只支持 .zip 压缩包，请重新选择");
+        return;
+      }
       try {
         const bytes = await readFileAsBytes(picked);
         logger.debug(`已选择压缩包 ${picked.name} ${bytes.byteLength} 字节`, {
@@ -1449,18 +1742,160 @@ whenHost((paw) => {
         });
         setArchive({ name: picked.name, bytes });
         setFileError(null);
-        if (!name) setName(picked.name.replace(/\.zip$/i, ""));
+        setReport(null);
+        setInspectError(null);
+        setResult(null);
+        lastInspect.current = ""; // 同一个包再选一次也要重新校验
+        // 每次都跟着换名称：上一次的名称属于上一个包，不能只填第一次。
+        setName(picked.name.replace(/\.zip$/i, ""));
+        // 上一个包推出来的标识符立刻作废：防抖那 300ms 里点发布也不能带上
+        // 旧 id （留空时后端会按名称重新推导）。
+        if (!slugEdited.current) setSlug("");
+        setPickRevision((value) => value + 1);
       } catch (err) {
         logger.error("读取压缩包失败", err);
         setFileError(err.message);
       }
-    }, [name]);
+    }, []);
+
+    const onPick = useCallback(
+      (event) => {
+        const picked = (event.target.files || [])[0];
+        event.target.value = ""; // allow picking the same file again
+        takeFile(picked);
+      },
+      [takeFile],
+    );
+
+    const pickDropped = useCallback((dataTransfer) => {
+      if (!dataTransfer) return undefined;
+      const files = dataTransfer.files || [];
+      if (files.length) return files[0];
+      // 少数 webview 只在 items 里给出文件。
+      const items = dataTransfer.items || [];
+      for (let index = 0; index < items.length; index += 1) {
+        const item = items[index];
+        if (item && item.kind === "file" && item.getAsFile) {
+          const file = item.getAsFile();
+          if (file) return file;
+        }
+      }
+      return undefined;
+    }, []);
+
+    const onDrop = useCallback(
+      (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        setDragging(false);
+        takeFile(pickDropped(event.dataTransfer));
+      },
+      [pickDropped, takeFile],
+    );
+
+    // 整块表单都是投放目标：拖偏一点（掉在报告或表单上）也要能收。
+    const isFileDrag = (event) => {
+      const types = (event.dataTransfer && event.dataTransfer.types) || [];
+      return Array.prototype.indexOf.call(types, "Files") >= 0;
+    };
+
+    const onZoneDragOver = useCallback((event) => {
+      if (!isFileDrag(event)) return;
+      event.preventDefault();
+      event.stopPropagation();
+      setDragging(true);
+    }, []);
+
+    const onZoneDragLeave = useCallback((event) => {
+      event.stopPropagation();
+      setDragging(false);
+    }, []);
+
+    /**
+     * 选完包就带着当前表单去市场干跑一次（`/offline-market/skills/inspect`）：
+     * 解包、闸门、slug 归属、版本冲突全在填表阶段回显，而不是点了发布才报第
+     * 一个错。改了版本或标识符会重跑，因为「版本已存在」取决于它们。
+     */
+    useEffect(() => {
+      if (!archive) return;
+      const local = precheckArchive(archive, limits);
+      if (local) {
+        setReport(null);
+        return;
+      }
+      const params = new URLSearchParams({
+        name: derivedName.trim() || archive.name.replace(/\.zip$/i, "") || "untitled",
+        version: stableVersion.trim(),
+        visibility,
+      });
+      if (slugEdited.current && stableSlug.trim()) params.set("slug", stableSlug.trim());
+      const signature = `${pickRevision}|${params.toString()}`;
+      // 同一份表单只干跑一次。去重必须在分配 seq 之前：否则「防抖追上来的
+      // 第二次 effect」会把 seq 抬上去却不发请求，前一次请求的回答就全被丢弃，
+      // 页面永远卡在「正在校验压缩包…」、发布按钮一直灰着。
+      if (lastInspect.current === signature) return;
+      lastInspect.current = signature;
+      const seq = ++inspectSeq.current;
+      setInspectError(null);
+      setInspecting(true);
+      request(`/offline-market/skills/inspect?${params}`, {
+        method: "POST",
+        headers: { "content-type": "application/zip" },
+        body: archive.bytes,
+      })
+        .then((body) => {
+          if (seq === inspectSeq.current) setReport(body);
+        })
+        .catch((err) => {
+          // 试运行只是相机预览：拿不到报告也能发布，交给后端兜底——但失败
+          // 必须显示出来，否则「选完包没反应」比报错更难查。
+          if (seq !== inspectSeq.current) return;
+          lastInspect.current = ""; // 允许重试同一份表单
+          const reason = (err && err.message) || String(err);
+          logger.warn("试运行失败（不影响发布）", err);
+          setInspectError(
+            err && err.status === 404
+              ? `插件还没加载试运行接口（${reason}）：重启 QwenPaw 后重试，或直接发布让市场校验。`
+              : `${reason}。可以直接发布，市场会在发布时再校验一次。`,
+          );
+        })
+        .finally(() => {
+          if (seq === inspectSeq.current) setInspecting(false);
+        });
+    }, [archive, derivedName, stableSlug, stableVersion, visibility, limits, pickRevision]);
+
+    const problems = (report && report.problems) || [];
+    const blocked = !archive || problems.length > 0;
+    const retryInspect = useCallback(() => {
+      lastInspect.current = "";
+      setInspectError(null);
+      setPickRevision((value) => value + 1);
+    }, []);
+
+    const reset = useCallback(() => {
+      setArchive(null);
+      setReport(null);
+      setInspectError(null);
+      setFileError(null);
+      setResult(null);
+      inspectSeq.current += 1;
+      lastInspect.current = "";
+      setInspecting(false);
+    }, []);
 
     const submit = useCallback(async () => {
+      if (!archive) {
+        setFileError("请先选择技能压缩包");
+        return;
+      }
       const problem = precheckArchive(archive, limits);
       if (problem) {
         logger.warn(`发布预检未通过：${problem}`);
         setFileError(problem);
+        return;
+      }
+      if (problems.length) {
+        logger.warn(`试运行仍有 ${problems.length} 个问题，已阻止提交`);
         return;
       }
       setBusy(true);
@@ -1494,7 +1929,14 @@ whenHost((paw) => {
           type: "success",
           text: `已发布 ${body.slug}@${body.version}（${body.file_count} 个文件）`,
         });
+        setResult({
+          slug: body.slug,
+          version: body.version,
+          fileCount: body.file_count,
+          name: params.get("name"),
+        });
         setArchive(null);
+        setReport(null);
         onPublished && onPublished();
       } catch (err) {
         logger.error(`发布失败（${Date.now() - started}ms）`, err);
@@ -1502,103 +1944,451 @@ whenHost((paw) => {
       } finally {
         setBusy(false);
       }
-    }, [archive, limits, name, slug, version, visibility, onNotice, onPublished]);
+    }, [
+      archive,
+      limits,
+      name,
+      slug,
+      version,
+      visibility,
+      problems,
+      onNotice,
+      onPublished,
+    ]);
+
+    const step = result ? 2 : archive ? 1 : 0;
+    const steps = Steps
+      ? h(Steps, {
+          size: "small",
+          current: step,
+          items: [
+            { title: "选择压缩包" },
+            { title: "校验信息" },
+            { title: "发布完成" },
+          ],
+          style: { marginBottom: 16 },
+        })
+      : null;
+
+    const manifest = report && report.manifest;
+    const existing = report && report.existing;
+
+    const reportPanel = !archive
+      ? null
+      : inspecting && !report
+        ? h(Text, { type: "secondary" }, "正在校验压缩包…")
+        : inspectError
+          ? h(Alert, {
+              type: "warning",
+              showIcon: true,
+              message: "试运行没跑起来",
+              description: h(
+                Space,
+                { direction: "vertical", size: 8 },
+                h(
+                  Text,
+                  { style: { fontSize: 12 } },
+                  `已选 ${archive.name} · ${formatBytes(archive.bytes.byteLength)}`,
+                ),
+                h(Text, { type: "secondary", style: { fontSize: 12 } }, inspectError),
+                h(
+                  Button,
+                  { size: "small", onClick: retryInspect, disabled: inspecting },
+                  "重试",
+                ),
+              ),
+            })
+          : report
+          ? h(
+              "div",
+              { style: { display: "grid", gap: 10 } },
+              h(
+                "div",
+                { style: { display: "flex", flexWrap: "wrap", gap: 8 } },
+                h(ReportStat, {
+                  label: "文件",
+                  value: `${report.file_count} 个`,
+                  palette,
+                }),
+                h(ReportStat, {
+                  label: "体积",
+                  value: formatBytes(report.size_bytes),
+                  palette,
+                }),
+                h(ReportStat, {
+                  label: "标识符",
+                  value: report.slug || "—",
+                  palette,
+                }),
+                manifest
+                  ? h(ReportStat, {
+                      label: "SKILL.md 名称",
+                      value: manifest.name || "—",
+                      palette,
+                    })
+                  : null,
+              ),
+              manifest && manifest.description
+                ? h(
+                    "div",
+                    {
+                      style: {
+                        fontSize: 12,
+                        color: palette.muted,
+                        padding: "0 2px",
+                        lineHeight: 1.6,
+                      },
+                    },
+                    manifest.description,
+                  )
+                : null,
+              existing
+                ? h(
+                    Alert,
+                    {
+                      type: existing.mine ? "info" : "warning",
+                      showIcon: true,
+                      message: existing.mine
+                        ? `这个标识符已在市场中（最新版本 ${existing.latest_version || "—"}）`
+                        : `标识符属于其他团队（${existing.owner_tenant}）`,
+                      description:
+                        existing.mine && report.next_version
+                          ? h(
+                              Space,
+                              { size: 6, wrap: true },
+                              h(
+                                Text,
+                                { type: "secondary" },
+                                `继续迭代就用 ${report.next_version}`,
+                              ),
+                              h(
+                                Button,
+                                {
+                                  size: "small",
+                                  onClick: () => setVersion(report.next_version),
+                                },
+                                `用 ${report.next_version}`,
+                              ),
+                            )
+                          : null,
+                    },
+                  )
+                : null,
+              problems.length
+                ? h(Alert, {
+                    type: "error",
+                    showIcon: true,
+                    message: `校验未通过（${problems.length} 个问题）`,
+                    description: h(
+                      "ul",
+                      { style: { margin: 0, paddingLeft: 18, lineHeight: 1.8 } },
+                      problems.map((item, index) =>
+                        h(
+                          "li",
+                          { key: `${item.code}-${index}` },
+                          h(Tag, { color: "red", style: { marginRight: 6 } }, item.code),
+                          item.message,
+                        ),
+                      ),
+                    ),
+                  })
+                : h(Alert, {
+                    type: "success",
+                    showIcon: true,
+                    message: "校验通过，可以发布",
+                  }),
+            )
+          : null;
+
+    const footer = h(
+      "div",
+      {
+        style: {
+          display: "flex",
+          alignItems: "center",
+          gap: 10,
+          flexWrap: "wrap",
+          marginTop: 4,
+          padding: "10px 12px",
+          borderRadius: 10,
+          background: palette.surfaceAlt,
+          border: palette.border,
+        },
+      },
+      h(
+        "span",
+        { style: { fontSize: 12, color: palette.muted } },
+        archive
+          ? `${archive.name} · ${formatBytes(archive.bytes.byteLength)}${
+              report ? ` · ${report.file_count} 个文件` : ""
+            }`
+          : "尚未选择压缩包",
+      ),
+      h("span", { style: { flex: "1 1 24px" } }),
+      h(Button, { onClick: reset, disabled: busy || !archive }, "清空"),
+      h(
+        Button,
+        {
+          type: "primary",
+          loading: busy,
+          disabled: blocked || inspecting,
+          onClick: submit,
+        },
+        busy ? "发布中…" : "立即发布",
+      ),
+    );
 
     return h(
       Card,
-      { size: "small", title: "发布技能" },
-      h(
-        "div",
-        { style: { display: "grid", gap: 10, maxWidth: 720 } },
-        h(
-          Space,
-          { wrap: true },
-          h(Text, null, "名称"),
-          Input
-            ? h(Input, {
-                value: name,
-                placeholder: "例如：周报助手",
-                style: { width: 220 },
-                onChange: (e) => setName(e.target.value),
-              })
-            : null,
-          h(Text, null, "标识符（可选）"),
-          Input
-            ? h(Input, {
-                value: slug,
-                placeholder: "默认由名称推导（英文/拼音）",
-                style: { width: 200 },
-                onChange: (e) => setSlug(e.target.value),
-              })
-            : null,
-        ),
-        h(
-          Space,
-          { wrap: true },
-          h(Text, null, "版本"),
-          Input
-            ? h(Input, {
-                value: version,
-                placeholder: "1.0.0",
-                style: { width: 140 },
-                onChange: (e) => setVersion(e.target.value),
-              })
-            : null,
-          h(Text, null, "可见性"),
-          Select
-            ? h(Select, {
-                value: visibility,
-                style: { width: 160 },
-                onChange: setVisibility,
-                options: [
-                  { value: "public", label: "公开（全部租户）" },
-                  { value: "tenant", label: "仅本租户" },
-                ],
-              })
-            : null,
-        ),
-        h(
-          "div",
-          null,
-          h("input", {
-            type: "file",
-            accept: ".zip,application/zip,application/x-zip-compressed",
-            onChange: onPick,
-            style: { color: "inherit" },
-          }),
-          h(
-            Paragraph,
-            { type: "secondary", style: { margin: "6px 0 0" } },
-            "上传技能压缩包（.zip）：根目录（或压缩包里唯一的顶层目录）必须包含 SKILL.md；" +
-              (limits
-                ? `后端限额：${limits.max_files} 个文件 / 单文件 ${limits.max_file_bytes} 字节 / 合计 ${limits.max_bundle_bytes} 字节。`
-                : "限额未取到，后端仍会校验。"),
-          ),
-        ),
-        archive
-          ? h(
-              Space,
-              { wrap: true },
-              h(Text, { strong: true }, "已选择："),
-              h(Tag, null, archive.name),
-              h(Text, { type: "secondary" }, `${(archive.bytes.byteLength / 1024).toFixed(1)} KB`),
-            )
+      {
+        size: "small",
+        title: "发布技能",
+        extra: limits
+          ? Tooltip
+            ? h(
+                Tooltip,
+                {
+                  title: `后端限额：${limits.max_files} 个文件 / 单文件 ${formatBytes(
+                    limits.max_file_bytes,
+                  )} / 合计 ${formatBytes(limits.max_bundle_bytes)}`,
+                },
+                h(Text, { type: "secondary" }, "市场校验规则"),
+              )
+            : h(Text, { type: "secondary" }, "市场校验规则")
           : null,
-        fileError ? h(Alert, { type: "error", showIcon: true, message: fileError }) : null,
-        h(
-          Text,
-          { type: "secondary" },
-          publisherName
-            ? `发布者：${publisherName}（取当前登录账号，市场列表就显示它）`
-            : "发布者：租户 id（console 未提供登录用户名）",
-        ),
-        h(
-          Space,
-          null,
-          h(Button, { type: "primary", loading: busy, onClick: submit }, "立即发布"),
-          h(Button, { onClick: () => setArchive(null) }, "清空压缩包"),
-        ),
-      ),
+      },
+      steps,
+      result
+        ? h(
+            "div",
+            {
+              style: {
+                display: "grid",
+                gap: 12,
+                justifyItems: "center",
+                textAlign: "center",
+                padding: "20px 12px",
+              },
+            },
+            h(
+              "div",
+              {
+                style: {
+                  width: 44,
+                  height: 44,
+                  borderRadius: 22,
+                  display: "grid",
+                  placeItems: "center",
+                  background: palette.dark
+                    ? "rgba(34, 197, 94, 0.18)"
+                    : "rgba(34, 197, 94, 0.12)",
+                  color: "#22c55e",
+                  fontSize: 22,
+                },
+              },
+              "✓",
+            ),
+            h("span", { style: { fontSize: 16, fontWeight: 600, color: palette.ink } }, "发布成功"),
+            h(
+              Text,
+              { type: "secondary" },
+              `${result.slug}@${result.version} · ${result.fileCount} 个文件 · 已在市场中`,
+            ),
+            h(
+              Space,
+              null,
+              h(
+                Button,
+                {
+                  type: "primary",
+                  onClick: () => {
+                    setResult(null);
+                    // 保留名称/标识符：接着发下一个版本是最常见的动作。
+                  },
+                },
+                "再发布一个版本",
+              ),
+              h(
+                Button,
+                {
+                  onClick: () => {
+                    setResult(null);
+                    setName("");
+                    setSlug("");
+                    setVersion("1.0.0");
+                    slugEdited.current = false;
+                  },
+                },
+                "发布另一个技能",
+              ),
+            ),
+          )
+        : h(
+            "div",
+            {
+              style: { display: "grid", gap: 18, maxWidth: 760 },
+              // 投放目标扩大到整块表单：拖偏一点也不能「没反应」。
+              onDragOver: (event) => {
+                if (busy || !isFileDrag(event)) return;
+                event.preventDefault();
+                setDragging(true);
+              },
+              onDragLeave: () => setDragging(false),
+              onDrop,
+            },
+            h(
+              "div",
+              { style: { display: "grid", gap: 10 } },
+              h(FormSection, {
+                index: 1,
+                title: "技能压缩包",
+                hint: "解包与校验在本地完成后发给市场",
+                palette,
+              }),
+              h(PackageDropZone, {
+                archive,
+                dragging,
+                disabled: busy,
+                onDragOver: onZoneDragOver,
+                onDragLeave: onZoneDragLeave,
+                onDrop,
+                onPick,
+                onClear: reset,
+                palette,
+                limits,
+              }),
+              reportPanel,
+            ),
+            h(
+              "div",
+              { style: { display: "grid", gap: 12 } },
+              h(FormSection, {
+                index: 2,
+                title: "发布信息",
+                hint: "标识符与版本决定了市场的安装路径",
+                palette,
+              }),
+              h(
+                "div",
+                { style: { display: "flex", flexWrap: "wrap", gap: 12 } },
+                h(
+                  FormField,
+                  {
+                    label: "名称",
+                    palette,
+                    hint: "市场列表里显示的名字",
+                    grow: 2,
+                  },
+                  Input
+                    ? h(Input, {
+                        value: name,
+                        placeholder: "例如：周报助手",
+                        onChange: (event) => setName(event.target.value),
+                      })
+                    : null,
+                ),
+                h(
+                  FormField,
+                  {
+                    label: "标识符",
+                    palette,
+                    hint: "按名称推导（中文转拼音，如 zhoubaozhushou）",
+                  },
+                  Input
+                    ? withAddon(
+                        h(Input, {
+                          value: slug,
+                          placeholder: "zhoubaozhushou",
+                          onChange: (event) => {
+                            slugEdited.current = true;
+                            setSlug(event.target.value);
+                          },
+                        }),
+                        h(
+                          Button,
+                          {
+                            onClick: () => {
+                              // 交还给自动推导：中文名会重新转成拼音。
+                              slugEdited.current = false;
+                              setSlug("");
+                              setPickRevision((value) => value + 1);
+                            },
+                          },
+                          "重算",
+                        ),
+                      )
+                    : null,
+                ),
+              ),
+              h(
+                "div",
+                { style: { display: "flex", flexWrap: "wrap", gap: 12 } },
+                h(
+                  FormField,
+                  {
+                    label: "版本",
+                    palette,
+                    hint:
+                      existing && existing.mine && report.next_version
+                        ? `已发布过，建议 ${report.next_version}`
+                        : "同一个标识符 + 版本只能发布一次",
+                  },
+                  Input
+                    ? h(Input, {
+                        value: version,
+                        placeholder: "1.0.0",
+                        onChange: (event) => setVersion(event.target.value),
+                      })
+                    : null,
+                ),
+                h(
+                  FormField,
+                  {
+                    label: "可见性",
+                    palette,
+                    hint: "公开后其他租户也能安装",
+                    grow: 2,
+                  },
+                  Radio && Radio.Group
+                    ? h(
+                        Radio.Group,
+                        {
+                          value: visibility,
+                          onChange: (event) => setVisibility(event.target.value),
+                          optionType: "button",
+                          buttonStyle: "solid",
+                          options: [
+                            { value: "public", label: "公开" },
+                            { value: "tenant", label: "仅本租户" },
+                          ],
+                        },
+                      )
+                    : Select
+                      ? h(Select, {
+                          value: visibility,
+                          style: { width: "100%" },
+                          onChange: setVisibility,
+                          options: [
+                            { value: "public", label: "公开（全部租户）" },
+                            { value: "tenant", label: "仅本租户" },
+                          ],
+                        })
+                      : null,
+                ),
+              ),
+              h(
+                "div",
+                { style: { fontSize: 12, color: palette.faint, lineHeight: 1.7 } },
+                publisherName
+                  ? `发布者：${publisherName}（取当前登录账号，市场列表就显示它）`
+                  : "发布者：租户 id（console 未提供登录用户名）",
+              ),
+            ),
+            fileError
+              ? h(Alert, { type: "error", showIcon: true, message: fileError, closable: true })
+              : null,
+            footer,
+          ),
       h(
         Paragraph,
         { type: "secondary", style: { marginTop: 12, marginBottom: 0 } },
@@ -1990,6 +2780,7 @@ whenHost((paw) => {
   }
 
   function AgentPublishTab({ onNotice, onPublished }) {
+    const { palette } = useMarketTheme();
     const [agents, setAgents] = useState([]);
     const [loadingAgents, setLoadingAgents] = useState(true);
     const [source, setSource] = useState("");
@@ -1999,8 +2790,26 @@ whenHost((paw) => {
     const [preview, setPreview] = useState(null);
     const [previewBusy, setPreviewBusy] = useState(false);
     const [busy, setBusy] = useState(false);
+    // 发布成功的结果卡（跟技能发布页一致）：打包+上传可能要几十秒，只在页面
+    // 顶部弹一条 Alert 的话，滚到下面的用户根本看不到哪儿变了。
+    const [result, setResult] = useState(null);
+    const [elapsed, setElapsed] = useState(0);
     const [error, setError] = useState("");
     const publisherName = useCurrentUserName();
+
+    // 没有真进度可拿（一次打包+上传就一个请求），就把等待秒数报出来。
+    useEffect(() => {
+      if (!busy) {
+        setElapsed(0);
+        return undefined;
+      }
+      const started = Date.now();
+      const timer = setInterval(
+        () => setElapsed(Math.round((Date.now() - started) / 1000)),
+        1000,
+      );
+      return () => clearInterval(timer);
+    }, [busy]);
 
     const loadAgents = useCallback(async () => {
       setLoadingAgents(true);
@@ -2061,6 +2870,7 @@ whenHost((paw) => {
       }
       setBusy(true);
       setError("");
+      setResult(null);
       try {
         const publisher = await currentUserName();
         const body = await postJsonSlow("/offline-market/agents/publish", {
@@ -2071,6 +2881,14 @@ whenHost((paw) => {
           publisher_name: publisher || undefined,
         });
         logger.info(`智能体发布成功 ${body.slug}@${body.version}`, body);
+        setResult({
+          slug: body.slug,
+          version: body.version,
+          files: body.file_count,
+          skills: body.skill_count,
+          visibility,
+          name: body.name || (selected && (selected.name || selected.id)) || source,
+        });
         onNotice({
           type: "success",
           text: `已发布 ${body.slug}@${body.version}（${body.file_count} 个文件 / ${body.skill_count} 个技能）`,
@@ -2083,7 +2901,7 @@ whenHost((paw) => {
       } finally {
         setBusy(false);
       }
-    }, [source, slug, version, visibility, onNotice, onPublished]);
+    }, [source, slug, version, visibility, selected, onNotice, onPublished]);
 
     const picker = Select
       ? h(Select, {
@@ -2091,6 +2909,7 @@ whenHost((paw) => {
           style: { width: 360 },
           placeholder: "选择本机智能体",
           loading: loadingAgents,
+          disabled: busy,
           onChange: (value) => {
             setSource(value);
             setPreview(null);
@@ -2114,10 +2933,89 @@ whenHost((paw) => {
           agents.map((item) => h("option", { key: item.id, value: item.id }, `${item.name || item.id} (${item.id})`)),
         );
 
+    // 发布成功后的结果卡：点完按钮原地就要有东西变。
+    const successPanel = !result
+      ? null
+      : h(
+      "div",
+      {
+        style: {
+          display: "grid",
+          gap: 12,
+          justifyItems: "center",
+          textAlign: "center",
+          padding: "20px 12px",
+        },
+      },
+      h(
+        "div",
+        {
+          style: {
+            width: 44,
+            height: 44,
+            borderRadius: 22,
+            display: "grid",
+            placeItems: "center",
+            background: palette.dark ? "rgba(34, 197, 94, 0.18)" : "rgba(34, 197, 94, 0.12)",
+            color: "#22c55e",
+            fontSize: 22,
+          },
+        },
+        "✓",
+      ),
+      h("span", { style: { fontSize: 16, fontWeight: 600, color: palette.ink } }, "发布成功"),
+      h(
+        Text,
+        { type: "secondary" },
+        `${result.slug}@${result.version} · ${result.files} 个文件 · ${result.skills} 个技能 · ${
+          result.visibility === "public" ? "公开" : "仅本租户"
+        }`,
+      ),
+      h(
+        Paragraph,
+        { type: "secondary", style: { margin: 0, fontSize: 12 } },
+        `${result.name} 已上架，其他用户现在就能在「智能体 → 市场」里装到自己的 runtime。`,
+      ),
+      h(
+        Space,
+        { wrap: true },
+        h(
+          Button,
+          {
+            type: "primary",
+            onClick: () => {
+              setResult(null);
+              // 同名智能体接着发下一个版本是最常见的动作，版本号顺手抬一位。
+              const parts = String(result.version || "").split(".");
+              if (parts.length === 3 && parts.every((part) => /^\d+$/.test(part))) {
+                setVersion(`${parts[0]}.${parts[1]}.${Number(parts[2]) + 1}`);
+              }
+            },
+          },
+          "再发布一个版本",
+        ),
+        h(
+          Button,
+          {
+            onClick: () => {
+              setResult(null);
+              setSource("");
+              setSlug("");
+              setVersion("1.0.0");
+              setPreview(null);
+            },
+          },
+          "发布另一个智能体",
+        ),
+      ),
+    );
+
     return h(
       Card,
       { size: "small", title: "发布智能体" },
-      h(
+      result
+        ? successPanel
+        : h(
         "div",
         { style: { display: "grid", gap: 10, maxWidth: 760 } },
         agents.length
@@ -2133,7 +3031,7 @@ whenHost((paw) => {
           { wrap: true },
           h(Text, null, "来源智能体"),
           picker,
-          h(Button, { onClick: loadAgents, loading: loadingAgents }, "刷新"),
+          h(Button, { onClick: loadAgents, loading: loadingAgents, disabled: busy }, "刷新"),
         ),
         selected
           ? h(
@@ -2149,8 +3047,9 @@ whenHost((paw) => {
           Input
             ? h(Input, {
                 value: slug,
-                placeholder: "留空则按名称推导（中文名生成 agent-<hash>）",
+                placeholder: "留空则按名称推导（中文名取拼音）",
                 style: { width: 200 },
+                disabled: busy,
                 onChange: (event) => setSlug(event.target.value),
               })
             : null,
@@ -2160,6 +3059,7 @@ whenHost((paw) => {
                 value: version,
                 placeholder: "1.0.0",
                 style: { width: 140 },
+                disabled: busy,
                 onChange: (event) => setVersion(event.target.value),
               })
             : null,
@@ -2168,6 +3068,7 @@ whenHost((paw) => {
             ? h(Select, {
                 value: visibility,
                 style: { width: 160 },
+                disabled: busy,
                 onChange: setVisibility,
                 options: [
                   { value: "public", label: "公开（全部租户）" },
@@ -2179,9 +3080,26 @@ whenHost((paw) => {
         h(
           Space,
           null,
-          h(Button, { onClick: doPreview, loading: previewBusy, disabled: !source }, "预览将打包内容"),
-          h(Button, { type: "primary", onClick: submit, loading: busy, disabled: !source }, "立即发布"),
+          h(
+            Button,
+            { onClick: doPreview, loading: previewBusy, disabled: !source || busy },
+            "预览将打包内容",
+          ),
+          h(
+            Button,
+            { type: "primary", onClick: submit, loading: busy, disabled: !source || busy },
+            busy ? "发布中…" : "立即发布",
+          ),
         ),
+        busy
+          ? h(Alert, {
+              type: "info",
+              showIcon: true,
+              message: `正在打包并上传智能体…已等待 ${elapsed}s`,
+              description:
+                "人设 MD 与已启用技能会一起打包上传，体量大的智能体可能要 1-3 分钟，发布完成前请不要关掉页面。",
+            })
+          : null,
         preview
           ? h(
               Card,

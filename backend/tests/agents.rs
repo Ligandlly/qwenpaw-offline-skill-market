@@ -285,6 +285,8 @@ async fn agent_skill_names_are_not_style_restricted() {
 
 #[tokio::test]
 async fn agent_names_without_ascii_get_a_stable_slug() {
+    // Chinese names now derive a pinyin slug instead of the hashed fallback; the
+    // fallback only covers names that yield no ASCII at all (e.g. emoji).
     let h = Harness::new();
     let files = agent_files("周报助手", "中文名智能体");
     let (status, first, _) = h
@@ -302,7 +304,7 @@ async fn agent_names_without_ascii_get_a_stable_slug() {
         .await;
     assert_eq!(status, StatusCode::CREATED, "{first}");
     let slug = first["slug"].as_str().expect("slug").to_string();
-    assert!(slug.starts_with("agent-"), "{slug}");
+    assert_eq!(slug, "zhoubaozhushou", "{first}");
     assert!(offline_market_backend::limits::valid_slug(&slug), "{slug}");
 
     let (status, second, _) = h
@@ -320,6 +322,48 @@ async fn agent_names_without_ascii_get_a_stable_slug() {
         .await;
     assert_eq!(status, StatusCode::CREATED, "{second}");
     assert_eq!(second["slug"], slug.as_str());
+    assert_eq!(second["latest_version"], "1.0.1");
+}
+
+#[tokio::test]
+async fn republishing_a_chinese_agent_keeps_its_existing_slug() {
+    // Entries published before Chinese names gained pinyin slugs carry an
+    // `agent-<hash>` slug. Republishing must extend that entry (same tenant,
+    // same display name) instead of creating a second listing.
+    let h = Harness::new();
+    let files = agent_files("周报助手", "中文名智能体");
+    let (status, first, _) = h
+        .call(
+            "POST",
+            "/api/v1/agents",
+            Some("tenant-a"),
+            Some(json!({
+                "slug": "agent-0123abcd",
+                "version": "1.0.0",
+                "visibility": "public",
+                "files": files
+            })),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{first}");
+    assert_eq!(first["slug"], "agent-0123abcd");
+
+    let (status, second, _) = h
+        .call(
+            "POST",
+            "/api/v1/agents",
+            Some("tenant-a"),
+            Some(json!({
+                "version": "1.0.1",
+                "visibility": "public",
+                "files": agent_files("周报助手", "中文名智能体")
+            })),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{second}");
+    assert_eq!(second["slug"], "agent-0123abcd");
     assert_eq!(second["latest_version"], "1.0.1");
 }
 

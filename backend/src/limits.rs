@@ -123,41 +123,69 @@ pub fn check_bundle(
     files: &BTreeMap<String, FileData>,
     limits: &Limits,
 ) -> Result<CheckedBundle, Reject> {
+    match review_bundle(name, files, limits) {
+        (Some(checked), _) => Ok(checked),
+        // Problems are pushed in the order the publish path used to fail in, so
+        // the code an API client sees is unchanged.
+        (None, problems) => Err(problems
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| Reject::new("invalid_bundle", "压缩包不合法"))),
+    }
+}
+
+/// Every problem in a bundle, not just the first one.
+///
+/// Publishing still fails on the first problem ([`check_bundle`]) — nobody needs
+/// the whole list after the fact. The publish *form* does: it runs this against
+/// the archive the user just picked and points at everything that needs fixing
+/// before they spend a round-trip on `POST /skills`.
+///
+/// The checks are the same ones, in the same order, so a bundle that passes here
+/// always passes the real gate.
+pub fn review_bundle(
+    name: &str,
+    files: &BTreeMap<String, FileData>,
+    limits: &Limits,
+) -> (Option<CheckedBundle>, Vec<Reject>) {
+    let mut problems: Vec<Reject> = Vec::new();
     if name.trim().is_empty() {
-        return Err(Reject::new("invalid_name", "skill name must not be empty"));
+        problems.push(Reject::new("invalid_name", "技能名称不能为空"));
     }
     if name.chars().count() > 128 {
-        return Err(Reject::new("invalid_name", "skill name is too long"));
+        problems.push(Reject::new("invalid_name", "技能名称过长"));
     }
     if files.is_empty() {
-        return Err(Reject::new("empty_bundle", "bundle contains no files"));
+        problems.push(Reject::new("empty_bundle", "压缩包里没有任何文件"));
     }
     if files.len() > limits.max_files {
-        return Err(Reject::new(
+        problems.push(Reject::new(
             "too_many_files",
             format!(
-                "bundle has {} files, limit is {}",
+                "压缩包内有 {} 个文件，上限为 {}",
                 files.len(),
                 limits.max_files
             ),
         ));
     }
-    if !files.contains_key(MANIFEST) {
-        return Err(Reject::new(
+    if !files.is_empty() && !files.contains_key(MANIFEST) {
+        problems.push(Reject::new(
             "missing_manifest",
-            format!("bundle must contain {MANIFEST} at its root"),
+            format!("压缩包根目录必须包含 {MANIFEST}"),
         ));
     }
 
     let mut size_bytes = 0usize;
     for (path, content) in files {
-        check_path(path)?;
+        if let Err(reject) = check_path(path) {
+            problems.push(reject);
+        }
         let n = content.len();
         if n > limits.max_file_bytes {
-            return Err(Reject::new(
+            problems.push(Reject::new(
                 "file_too_large",
                 format!(
-                    "{path} is {n} bytes, per-file limit is {}",
+                    "{path} 有 {n} 字节，单文件上限为 {} 字节",
                     limits.max_file_bytes
                 ),
             ));
@@ -165,60 +193,76 @@ pub fn check_bundle(
         size_bytes += n;
     }
     if size_bytes > limits.max_bundle_bytes {
-        return Err(Reject::new(
+        problems.push(Reject::new(
             "bundle_too_large",
             format!(
-                "bundle is {size_bytes} bytes, limit is {}",
+                "压缩包共 {size_bytes} 字节，上限为 {} 字节",
                 limits.max_bundle_bytes
             ),
         ));
     }
-    let manifest = files[MANIFEST].as_text().ok_or_else(|| {
-        Reject::new(
-            "invalid_manifest",
-            "SKILL.md must be UTF-8 text (binary assets belong in other files)",
-        )
-    })?;
-    if manifest.trim().is_empty() {
-        return Err(Reject::new("empty_manifest", "SKILL.md is empty"));
+    match files.get(MANIFEST) {
+        // The absence is already reported above; nothing to add.
+        None => {}
+        Some(content) => match content.as_text() {
+            None => problems.push(Reject::new(
+                "invalid_manifest",
+                "SKILL.md 必须是 UTF-8 文本（二进制文件请放在其他文件里）",
+            )),
+            Some(manifest) if manifest.trim().is_empty() => {
+                problems.push(Reject::new("empty_manifest", "SKILL.md 是空的"));
+            }
+            Some(manifest) => {
+                if let Err(reject) = manifest_meta(manifest) {
+                    problems.push(reject);
+                }
+            }
+        },
     }
-    manifest_meta(manifest)?;
 
-    Ok(CheckedBundle {
-        name: name.trim().to_string(),
-        files: files.clone(),
-        sha256: digest(files),
-        size_bytes,
-    })
+    if problems.is_empty() {
+        let checked = CheckedBundle {
+            name: name.trim().to_string(),
+            files: files.clone(),
+            sha256: digest(files),
+            size_bytes,
+        };
+        (Some(checked), problems)
+    } else {
+        (None, problems)
+    }
 }
 
 pub(crate) fn check_path(path: &str) -> Result<(), Reject> {
     if path.is_empty() || path.len() > 200 {
-        return Err(Reject::new("invalid_path", format!("bad path {:?}", path)));
+        return Err(Reject::new(
+            "invalid_path",
+            format!("路径不合法：{:?}", path),
+        ));
     }
     if path.starts_with('/') || path.starts_with('\\') || path.contains(':') {
         return Err(Reject::new(
             "absolute_path",
-            format!("{path}: absolute paths are not allowed"),
+            format!("{path}：不允许使用绝对路径"),
         ));
     }
     if path.contains('\0') || path.chars().any(|c| c.is_control()) {
         return Err(Reject::new(
             "invalid_path",
-            format!("{path}: control characters are not allowed"),
+            format!("{path}：不允许包含控制字符"),
         ));
     }
     if path.contains('\\') {
         return Err(Reject::new(
             "invalid_path",
-            format!("{path}: use forward slashes"),
+            format!("{path}：请使用正斜杠 /"),
         ));
     }
     for seg in path.split('/') {
         if seg.is_empty() || seg == "." || seg == ".." {
             return Err(Reject::new(
                 "traversal",
-                format!("{path}: empty, '.' or '..' segments are not allowed"),
+                format!("{path}：不允许出现空路径段、'.' 或 '..'"),
             ));
         }
     }
@@ -241,7 +285,7 @@ pub(crate) fn manifest_meta(content: &str) -> Result<(String, String), Reject> {
     if lines.next().map(str::trim_end) != Some("---") {
         return Err(Reject::new(
             "invalid_manifest",
-            "SKILL.md must start with a '---' frontmatter block containing name and description",
+            "SKILL.md 必须以 '---' 包裹的 frontmatter 区块开头，并包含 name 和 description",
         ));
     }
     let (mut name, mut description) = (String::new(), String::new());
@@ -267,13 +311,13 @@ pub(crate) fn manifest_meta(content: &str) -> Result<(String, String), Reject> {
     if !closed {
         return Err(Reject::new(
             "invalid_manifest",
-            "SKILL.md frontmatter is not terminated by '---'",
+            "SKILL.md 的 frontmatter 缺少结尾的 '---'",
         ));
     }
     if name.is_empty() || description.is_empty() {
         return Err(Reject::new(
             "invalid_manifest",
-            "SKILL.md frontmatter must include non-empty name and description (QwenPaw rejects the install otherwise)",
+            "SKILL.md 的 frontmatter 必须包含非空的 name 和 description（否则 QwenPaw 会拒绝安装）",
         ));
     }
     Ok((name, description))
@@ -313,9 +357,13 @@ pub fn digest(files: &BTreeMap<String, FileData>) -> String {
     format!("{:x}", h.finalize())
 }
 
+/// Upper bound for a slug, in bytes (`[a-z0-9-]` only, so bytes == chars).
+/// `derive_slug` truncates to this so a long Chinese name still gets an id.
+pub const MAX_SLUG_LEN: usize = 64;
+
 pub fn valid_slug(slug: &str) -> bool {
     let bytes = slug.as_bytes();
-    (1..=64).contains(&bytes.len())
+    (1..=MAX_SLUG_LEN).contains(&bytes.len())
         && bytes
             .first()
             .is_some_and(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
@@ -528,5 +576,36 @@ mod tests {
         assert_eq!(digest(&a), digest(&b));
         let c = bundle(&[("SKILL.md", "#"), ("b.md", "3"), ("a.md", "1")]);
         assert_ne!(digest(&a), digest(&c));
+    }
+
+    /// The publish form needs the whole list, the publish path only the first.
+    #[test]
+    fn review_reports_every_problem_at_once() {
+        let files = bundle(&[
+            ("a.md", "no manifest here"),
+            ("../escape.md", "x"),
+            ("big.bin", &"0".repeat(300 * 1024)),
+            ("b.md", "y"),
+            ("c.md", "z"),
+        ]);
+        let (checked, problems) = review_bundle("Demo", &files, &limits());
+        assert!(checked.is_none());
+        let codes: Vec<&str> = problems.iter().map(|p| p.code).collect();
+        // too_many_files (3 files max, 5 sent), missing manifest, traversal,
+        // file too large — all of them, not just the first.
+        assert!(codes.contains(&"too_many_files"), "{codes:?}");
+        assert!(codes.contains(&"missing_manifest"), "{codes:?}");
+        assert!(codes.contains(&"traversal"), "{codes:?}");
+        assert!(codes.contains(&"file_too_large"), "{codes:?}");
+        // And the fail-fast gate still reports the first one only.
+        assert_eq!(
+            check_bundle("Demo", &files, &limits()).unwrap_err().code,
+            "too_many_files"
+        );
+
+        let good = bundle(&[(MANIFEST, GOOD_MANIFEST)]);
+        let (checked, problems) = review_bundle("Demo", &good, &limits());
+        assert!(problems.is_empty());
+        assert_eq!(checked.map(|b| b.files.len()), Some(1));
     }
 }

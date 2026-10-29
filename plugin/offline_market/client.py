@@ -147,6 +147,14 @@ class BackendClient:
     def status(self, slug: str) -> Any:
         return self._request("GET", f"/api/v1/skills/{urllib.parse.quote(slug)}/status")
 
+    def derive_slug(self, name: str) -> Any:
+        """Identifier a publish would derive from ``name`` (Chinese -> pinyin).
+
+        The backend owns the rule, so the publish form prefills 标识符 with the
+        exactly-same value the market would pick on its own.
+        """
+        return self._request("GET", "/api/v1/slug", query={"name": name})
+
     def fetch_bundle(self, slug: str, version: str) -> Any:
         return self._request(
             "GET", f"/skills/{urllib.parse.quote(slug)}/{urllib.parse.quote(version or 'latest')}"
@@ -176,6 +184,31 @@ class BackendClient:
             # name it already recorded (a publish must not blank it).
             body["publisher_name"] = publisher_name
         return self._request("POST", "/api/v1/skills", body=body)
+
+    def validate(
+        self,
+        *,
+        name: str,
+        version: str,
+        files: dict[str, Any],
+        slug: str | None = None,
+        visibility: str = "public",
+    ) -> Any:
+        """Dry run of :meth:`publish` — the publish form's 校验 step.
+
+        Returns every problem (bundle gate, slug rules, version collision,
+        ownership) plus the parsed manifest, file sizes and the suggested next
+        patch version, so the page can show all of it before anything is
+        uploaded. Writes nothing on the market.
+        """
+        body: dict[str, Any] = {
+            "name": name,
+            "slug": slug,
+            "version": version,
+            "visibility": visibility,
+            "files": files,
+        }
+        return self._request("POST", "/api/v1/skills/validate", body=body)
 
     def withdraw(self, slug: str, reason: str | None = None) -> Any:
         return self._request(

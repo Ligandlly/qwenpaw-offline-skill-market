@@ -5,6 +5,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
+use pinyin::ToPinyin;
 use rusqlite::{params, Row};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -43,7 +44,7 @@ impl ApiError {
         Self::new(
             StatusCode::INTERNAL_SERVER_ERROR,
             "db_error",
-            format!("database error: {err}"),
+            format!("数据库错误：{err}"),
         )
     }
 
@@ -306,7 +307,7 @@ pub async fn skill_status(
     let mut rows = stmt.query(params![slug]).map_err(ApiError::db)?;
     let Some(row) = rows.next().map_err(ApiError::db)? else {
         debug!(tenant = %tenant.0, slug = %slug, "status: unknown skill");
-        return Err(ApiError::not_found("unknown skill"));
+        return Err(ApiError::not_found("技能不存在"));
     };
     let owner: String = row.get("owner_tenant").map_err(ApiError::db)?;
     let visibility: String = row.get("visibility").map_err(ApiError::db)?;
@@ -318,7 +319,7 @@ pub async fn skill_status(
             visibility = %visibility,
             "status: not visible to tenant"
         );
-        return Err(ApiError::not_found("unknown skill"));
+        return Err(ApiError::not_found("技能不存在"));
     }
     let withdrawn_at: Option<i64> = row.get("withdrawn_at").map_err(ApiError::db)?;
     let takedown_at: Option<i64> = row.get("takedown_at").map_err(ApiError::db)?;
@@ -356,6 +357,21 @@ pub struct PublishRequest {
 
 fn default_visibility() -> String {
     "public".to_string()
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SlugQuery {
+    #[serde(default)]
+    pub name: String,
+}
+
+/// GET /api/v1/slug?name=... — the identifier a publish would derive.
+///
+/// The publish page calls this to prefill 标识符 (Chinese names included), so the
+/// derivation lives in exactly one place: here. `slug` is `null` when the name
+/// yields nothing usable; the page then leaves the field empty.
+pub async fn preview_slug(Query(query): Query<SlugQuery>) -> Json<Value> {
+    Json(json!({ "name": query.name, "slug": derive_slug(&query.name) }))
 }
 
 #[derive(Debug, Deserialize)]
@@ -454,14 +470,14 @@ pub async fn publish(
         return Err(ApiError::new(
             StatusCode::BAD_REQUEST,
             "invalid_visibility",
-            "visibility must be 'public' or 'tenant'",
+            "可见范围只能是 public 或 tenant",
         ));
     }
     if !limits::valid_version(&body.version) {
         return Err(ApiError::new(
             StatusCode::BAD_REQUEST,
             "invalid_version",
-            "version must be 1-32 chars of [0-9A-Za-z.+-] and start alphanumeric",
+            "版本号需为 1-32 位，只能包含 0-9 A-Z a-z . + -，且以字母或数字开头",
         ));
     }
     let slug = match body
@@ -475,7 +491,7 @@ pub async fn publish(
             ApiError::new(
                 StatusCode::BAD_REQUEST,
                 "invalid_slug",
-                "cannot derive a slug from the name; pass an explicit lowercase ascii slug",
+                "无法从名称推导出标识符，请手动填写一个只含小写字母、数字和 - 的标识符",
             )
         })?,
     };
@@ -483,7 +499,7 @@ pub async fn publish(
         return Err(ApiError::new(
             StatusCode::BAD_REQUEST,
             "invalid_slug",
-            "slug must be 1-64 chars of [a-z0-9-] and start alphanumeric",
+            "标识符需为 1-64 位，只能包含小写字母、数字和 -，且以字母或数字开头",
         ));
     }
 
@@ -530,7 +546,7 @@ pub async fn publish(
                 "publish rejected: slug belongs to another tenant"
             );
             return Err(ApiError::forbidden(format!(
-                "slug '{slug}' already belongs to another tenant"
+                "标识符 '{slug}' 已被其他团队占用"
             )));
         }
         if takedown_at.is_some() {
@@ -541,7 +557,7 @@ pub async fn publish(
             );
             return Err(ApiError::conflict(
                 "taken_down",
-                "this skill was taken down by an administrator; publishing is blocked",
+                "该技能已被管理员下架，不能再发布",
             ));
         }
     }
@@ -589,7 +605,10 @@ pub async fn publish(
         );
         return Err(ApiError::conflict(
             "version_exists",
-            format!("version {} already exists and is immutable", body.version),
+            format!(
+                "版本 {} 已存在且不可修改，请不要重复发布同一个版本号",
+                body.version
+            ),
         ));
     }
 
@@ -668,6 +687,210 @@ pub struct WithdrawRequest {
     pub reason: Option<String>,
 }
 
+/// Bump the patch component of ``x.y.z`` for the "publish a new version" hint.
+/// Anything unexpected (a tag like ``v1``, a date, four components) yields
+/// ``None`` and the form keeps whatever the user typed.
+fn suggest_next_version(latest: &str) -> Option<String> {
+    let parts: Vec<&str> = latest.trim().split('.').collect();
+    if parts.len() != 3 {
+        return None;
+    }
+    let mut numbers = [0u64; 3];
+    for (slot, part) in numbers.iter_mut().zip(parts.iter()) {
+        if part.is_empty() || !part.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        *slot = part.parse().ok()?;
+    }
+    Some(format!(
+        "{}.{}.{}",
+        numbers[0],
+        numbers[1],
+        numbers[2].checked_add(1)?
+    ))
+}
+
+/// The slate a publish would land on, as the dry run reports it back.
+struct ExistingSkill {
+    name: String,
+    owner_tenant: String,
+    latest_version: Option<String>,
+    takedown_at: Option<i64>,
+    withdrawn_at: Option<i64>,
+}
+
+/// POST /api/v1/skills/validate — dry run of a publish.
+///
+/// The publish form calls this on the archive the user just picked, so every
+/// problem (bundle gate, slug, version collision, ownership) shows up as a list
+/// before they hit 发布 instead of as one 4xx after it. Read-only: no rows are
+/// written, nothing is audited, downloads do not move.
+pub async fn validate(
+    State(app): State<Shared>,
+    tenant: TenantId,
+    Json(body): Json<PublishRequest>,
+) -> ApiResult<Json<Value>> {
+    let mut problems: Vec<Value> = Vec::new();
+    let mut push = |code: &str, message: String| {
+        problems.push(json!({ "code": code, "message": message }));
+    };
+
+    if !matches!(body.visibility.as_str(), "public" | "tenant") {
+        push(
+            "invalid_visibility",
+            "可见范围只能是 public 或 tenant".into(),
+        );
+    }
+    if !limits::valid_version(&body.version) {
+        push(
+            "invalid_version",
+            "版本号需为 1-32 位，只能包含 0-9 A-Z a-z . + -，且以字母或数字开头".into(),
+        );
+    }
+
+    let slug = match body
+        .slug
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        Some(slug) => Some(slug.to_string()),
+        None => derive_slug(&body.name),
+    };
+    match &slug {
+        None => push(
+            "invalid_slug",
+            "无法从名称推导出标识符，请手动填写一个只含小写字母、数字和 - 的标识符".into(),
+        ),
+        Some(slug) if !limits::valid_slug(slug) => push(
+            "invalid_slug",
+            "标识符需为 1-64 位，只能包含小写字母、数字和 -，且以字母或数字开头".into(),
+        ),
+        Some(_) => {}
+    }
+
+    let (_checked, rejects) = limits::review_bundle(&body.name, &body.files, &app.cfg.limits);
+    for reject in rejects {
+        push(reject.code, reject.message);
+    }
+
+    // Slate-level checks: only meaningful once the slug is a real string, and
+    // the same rules the publish path applies.
+    let mut existing: Option<Value> = None;
+    let mut next_version: Option<String> = None;
+    if let Some(slug) = slug.as_deref().filter(|s| limits::valid_slug(s)) {
+        let db = app.db();
+        let row: Option<ExistingSkill> = db
+            .query_row(
+                "SELECT name, owner_tenant, latest_version, takedown_at, withdrawn_at
+                 FROM skills WHERE slug = ?1",
+                params![slug],
+                |row| {
+                    Ok(ExistingSkill {
+                        name: row.get(0)?,
+                        owner_tenant: row.get(1)?,
+                        latest_version: row.get(2)?,
+                        takedown_at: row.get(3)?,
+                        withdrawn_at: row.get(4)?,
+                    })
+                },
+            )
+            .ok();
+        if let Some(ExistingSkill {
+            name,
+            owner_tenant: owner,
+            latest_version: latest,
+            takedown_at,
+            withdrawn_at,
+        }) = row
+        {
+            let mine = owner == tenant.0;
+            if mine {
+                next_version = latest.as_deref().and_then(suggest_next_version);
+                if takedown_at.is_some() {
+                    push("taken_down", "该技能已被管理员下架，不能再发布".into());
+                }
+            } else {
+                push("slug_taken", format!("标识符 '{slug}' 已被其他团队占用"));
+            }
+            existing = Some(json!({
+                "name": name,
+                "owner_tenant": owner,
+                "latest_version": latest,
+                "state": if takedown_at.is_some() {
+                    "taken_down"
+                } else if withdrawn_at.is_some() {
+                    "withdrawn"
+                } else {
+                    "active"
+                },
+                "mine": mine,
+            }));
+        }
+        let taken: i64 = db
+            .query_row(
+                "SELECT COUNT(*) FROM skill_versions WHERE slug = ?1 AND version = ?2",
+                params![slug, body.version],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
+        if taken > 0 {
+            push(
+                "version_exists",
+                format!(
+                    "版本 {} 已存在且不可修改，请不要重复发布同一个版本号",
+                    body.version
+                ),
+            );
+        }
+    }
+
+    // A manifest that parses is worth showing: the page previews the name and
+    // description the host will display after install.
+    let manifest = body
+        .files
+        .get(MANIFEST)
+        .and_then(|content| content.as_text())
+        .and_then(|text| limits::manifest_meta(text).ok())
+        .map(|(name, description)| json!({ "name": name, "description": description }));
+
+    let file_count = body.files.len();
+    let size_bytes: usize = body.files.values().map(|content| content.len()).sum();
+    let files: Vec<Value> = body
+        .files
+        .iter()
+        .map(|(path, content)| json!({ "path": path, "size_bytes": content.len() }))
+        .collect();
+
+    debug!(
+        tenant = %tenant.0,
+        slug = slug.as_deref().unwrap_or("-"),
+        files = file_count,
+        problems = problems.len(),
+        "validate"
+    );
+
+    Ok(Json(json!({
+        "ok": problems.is_empty(),
+        "slug": slug,
+        "name": body.name.trim(),
+        "version": body.version,
+        "visibility": body.visibility,
+        "file_count": file_count,
+        "size_bytes": size_bytes,
+        "files": files,
+        "manifest": manifest,
+        "existing": existing,
+        "next_version": next_version,
+        "limits": {
+            "max_files": app.cfg.limits.max_files,
+            "max_file_bytes": app.cfg.limits.max_file_bytes,
+            "max_bundle_bytes": app.cfg.limits.max_bundle_bytes,
+        },
+        "problems": problems,
+    })))
+}
+
 /// POST /api/v1/skills/{slug}/withdraw — owner may pull its own skill.
 pub async fn withdraw(
     State(app): State<Shared>,
@@ -683,10 +906,10 @@ pub async fn withdraw(
             params![slug],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
-        .map_err(|_| ApiError::not_found("unknown skill"))?;
+        .map_err(|_| ApiError::not_found("技能不存在"))?;
     if owner != tenant.0 {
         warn!(tenant = %tenant.0, slug = %slug, "withdraw rejected: not the owner");
-        return Err(ApiError::forbidden("only the owning tenant may withdraw"));
+        return Err(ApiError::forbidden("只有发布者所在团队才能下架"));
     }
     if takedown_at.is_some() {
         warn!(
@@ -694,10 +917,7 @@ pub async fn withdraw(
             slug = %slug,
             "withdraw rejected: skill is taken down"
         );
-        return Err(ApiError::conflict(
-            "taken_down",
-            "already taken down by an administrator",
-        ));
+        return Err(ApiError::conflict("taken_down", "该条目已被管理员下架"));
     }
     db.execute(
         "UPDATE skills SET withdrawn_at = ?2, withdrawn_by = ?3 WHERE slug = ?1",
@@ -735,14 +955,14 @@ pub async fn restore(
             params![slug],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
-        .map_err(|_| ApiError::not_found("unknown skill"))?;
+        .map_err(|_| ApiError::not_found("技能不存在"))?;
     if owner != tenant.0 {
         warn!(
             tenant = %tenant.0,
             slug = %slug,
             "restore rejected: not the owner"
         );
-        return Err(ApiError::forbidden("only the owning tenant may restore"));
+        return Err(ApiError::forbidden("只有发布者所在团队才能重新上架"));
     }
     if takedown_at.is_some() {
         warn!(
@@ -752,7 +972,7 @@ pub async fn restore(
         );
         return Err(ApiError::conflict(
             "taken_down",
-            "an administrator took this skill down; it cannot be self-restored",
+            "该技能由管理员下架，不能自行恢复上架",
         ));
     }
     db.execute(
@@ -802,7 +1022,7 @@ pub async fn fetch_bundle(
                 ))
             },
         )
-        .map_err(|_| ApiError::new(StatusCode::GONE, "gone", "unknown skill"))?;
+        .map_err(|_| ApiError::new(StatusCode::GONE, "gone", "技能不存在"))?;
 
     if takedown_at.is_some() {
         debug!(
@@ -813,7 +1033,7 @@ pub async fn fetch_bundle(
         return Err(ApiError::new(
             StatusCode::GONE,
             "taken_down",
-            "this skill was taken down by an administrator and can no longer be downloaded",
+            "该技能已被管理员下架，无法再下载",
         ));
     }
     let is_owner = owner == tenant.0;
@@ -826,7 +1046,7 @@ pub async fn fetch_bundle(
         return Err(ApiError::new(
             StatusCode::GONE,
             "withdrawn",
-            "the publisher withdrew this skill",
+            "发布者已撤回该技能",
         ));
     }
     if visibility != "public" && !is_owner {
@@ -836,11 +1056,11 @@ pub async fn fetch_bundle(
             visibility = %visibility,
             "bundle fetch: private skill"
         );
-        return Err(ApiError::forbidden("this skill is private to its tenant"));
+        return Err(ApiError::forbidden("该技能仅对所属团队可见"));
     }
 
     let resolved = if version == "latest" {
-        latest.ok_or_else(|| ApiError::new(StatusCode::GONE, "gone", "no published version"))?
+        latest.ok_or_else(|| ApiError::new(StatusCode::GONE, "gone", "还没有已发布的版本"))?
     } else {
         version
     };
@@ -853,13 +1073,13 @@ pub async fn fetch_bundle(
             params![slug, resolved],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
-        .map_err(|_| ApiError::not_found("unknown version"))?;
+        .map_err(|_| ApiError::not_found("版本不存在"))?;
 
     let files: BTreeMap<String, FileData> = serde_json::from_str(&bundle_json).map_err(|err| {
         ApiError::new(
             StatusCode::INTERNAL_SERVER_ERROR,
             "corrupt_bundle",
-            format!("stored bundle is unreadable: {err}"),
+            format!("存储的包无法读取：{err}"),
         )
     })?;
 
@@ -905,18 +1125,35 @@ fn db_ref(db: &rusqlite::Connection) -> &rusqlite::Connection {
     db
 }
 
+/// Identifier a publish derives from a display name: `My Skill!` -> `my-skill`,
+/// `周报助手` -> `zhoubaozhushou`.
+///
+/// Han characters become plain (tone-less) pinyin, syllables joined, so a
+/// Chinese name still gets a stable lowercase-ASCII slug instead of forcing the
+/// page to invent one. Everything else that is not `[a-z0-9]` separates words,
+/// repeated separators collapse, and the result is capped at `MAX_SLUG_LEN`
+/// (truncated on a separator) so long names do not fail the publish.
 pub(crate) fn derive_slug(name: &str) -> Option<String> {
-    let slug: String = name
-        .trim()
-        .to_lowercase()
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
-        .collect();
-    let slug = slug.trim_matches('-').to_string();
-    if slug.is_empty() || !limits::valid_slug(&slug) {
+    let mut slug = String::with_capacity(name.len());
+    for c in name.trim().chars() {
+        if c.is_ascii_alphanumeric() {
+            slug.push(c.to_ascii_lowercase());
+        } else if let Some(pinyin) = c.to_pinyin() {
+            slug.push_str(pinyin.plain());
+        } else if !slug.is_empty() && !slug.ends_with('-') {
+            slug.push('-');
+        }
+    }
+    let slug = slug.trim_matches('-');
+    let slug = if slug.len() > limits::MAX_SLUG_LEN {
+        slug[..limits::MAX_SLUG_LEN].trim_end_matches('-')
+    } else {
+        slug
+    };
+    if slug.is_empty() || !limits::valid_slug(slug) {
         None
     } else {
-        Some(slug)
+        Some(slug.to_string())
     }
 }
 
@@ -953,9 +1190,37 @@ mod tests {
     }
 
     #[test]
+    fn suggests_the_next_patch_version() {
+        assert_eq!(suggest_next_version("1.0.0").as_deref(), Some("1.0.1"));
+        assert_eq!(suggest_next_version("2.2.2").as_deref(), Some("2.2.3"));
+        assert_eq!(suggest_next_version("1.0.9").as_deref(), Some("1.0.10"));
+        // Anything non-semver leaves the field alone.
+        for odd in ["v1", "1.0", "1.0.0.post1", "latest", ""] {
+            assert_eq!(suggest_next_version(odd), None, "{odd}");
+        }
+    }
+
+    #[test]
     fn derives_slugs() {
         assert_eq!(derive_slug("My Skill!"), Some("my-skill".to_string()));
-        assert_eq!(derive_slug("技能"), None);
+        assert_eq!(derive_slug("  My   Skill  "), Some("my-skill".into()));
+        assert_eq!(derive_slug("v1.2 tool"), Some("v1-2-tool".into()));
+        // Chinese names transliterate to plain pinyin instead of failing.
+        assert_eq!(derive_slug("技能"), Some("jineng".into()));
+        assert_eq!(derive_slug("周报助手"), Some("zhoubaozhushou".into()));
+        assert_eq!(
+            derive_slug("周报助手 Pro"),
+            Some("zhoubaozhushou-pro".into())
+        );
+        assert_eq!(derive_slug("技能（测试）"), Some("jineng-ceshi".into()));
+        // Nothing usable -> None (publish then demands an explicit slug).
+        assert_eq!(derive_slug(""), None);
+        assert_eq!(derive_slug("  "), None);
+        assert_eq!(derive_slug("!!!"), None);
+        // Long names are truncated on a separator, not rejected.
+        let long = derive_slug(&"技能".repeat(40)).unwrap();
+        assert!(limits::valid_slug(&long), "{long}");
+        assert_eq!(long.len(), 64);
     }
 
     #[test]

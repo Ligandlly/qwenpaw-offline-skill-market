@@ -5,10 +5,10 @@
 ## 1. 单元与集成测试
 
 ```bash
-# 后端：24 单测（闸门/slug/版本/智能体 manifest）+ 29 集成（隔离、不可变、下架语义、审计、列表 total/sort）
+# 后端：26 单测（闸门/slug/版本/智能体 manifest/发布试运行）+ 32 集成（隔离、不可变、下架语义、审计、列表 total/sort、拼音 slug、发布试运行）
 cd backend && cargo test
 
-# 插件：108 测试（扫描闸门、provider 契约、错误透传、路由 sort/total 透传、智能体快照/安装/回滚、概览统计、不联网）
+# 插件：111 测试（扫描闸门、provider 契约、错误透传、路由 sort/total 透传、智能体快照/安装/回滚、概览统计、发布试运行、不联网）
 cd plugin && python -m pytest
 ```
 

@@ -167,6 +167,7 @@ docker load -i offline-market-image.tar
 
 ## 语义（都有测试覆盖）
 
+- **错误文案**：用户可见的错误一律中文（`error.message`），程序判断只用 `error.code`（稳定英文，如 `version_exists`）；日志仍为英文。改文案不用改 `code`，`code` 不能改。
 - **版本不可变**：同 `slug+version` 二次发布 → 409 `version_exists`；`latest` 只前进不回退。
 - **下载量**：`skills.download_count` / `agents.download_count` 在 bundle 成功返回后自增；撤回/下架不会清零，`/api/v1/stats` 按「公开 + 本租户私有」汇总。升级前的历史下载无法回溯，从本版本开始计数。
 - **slug 归属**：别人已占用的 slug 发布 → 403，不能劫持。

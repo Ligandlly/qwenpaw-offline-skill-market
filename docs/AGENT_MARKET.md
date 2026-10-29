@@ -223,9 +223,12 @@ ALTER TABLE audit_log ADD COLUMN kind TEXT NOT NULL DEFAULT 'skill';  -- migrate
 | POST | `/api/v1/agents/{slug}/withdraw` | 属主撤回 |
 | POST | `/api/v1/agents/{slug}/restore` | 属主恢复；被下架 → `409` |
 | GET | `/api/v1/agents/{slug}/{version}/bundle` | 取 bundle；`version=latest` 走指针 |
+| GET | `/api/v1/slug?name=` | 标识符推导（中文名转拼音），发布表单用它预填 |
+| POST | `/api/v1/skills/validate` | 发布前干跑（只读）：闸门问题全量清单 + manifest + 体积 + 版本冲突 + 建议版本 |
 
 发布请求体（`name` / `description` 以包内 `manifest.json` 为准，避免两处不一致）。
-`slug` 可省略：名称能转成 ASCII slug 就按名称推导，否则使用稳定的
+`slug` 可省略：名称能转成 ASCII slug 就按名称推导（汉字按拼音，`周报助手` →
+`zhoubaozhushou`；超过 64 字节截到分隔符），完全推导不出时才回退到稳定的
 `agent-<sha256 前缀>`，所以中文名称的智能体可以直接发布，不需要手填标识符：
 
 ```json
@@ -417,6 +420,8 @@ loopback 默认端口；成功后就记住该地址。显式配置的地址不�
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
+| GET | `/api/offline-market/derive-slug?name=` | 标识符推导（代理后端 `GET /api/v1/slug`；中文名转拼音），发布页用它预填 |
+| POST | `/api/offline-market/skills/inspect?name=&slug=&version=&visibility=` | 发布页试运行：body 是 zip，插件解包后代理 `POST /api/v1/skills/validate`；坏包也返回报告而不是 4xx |
 | GET | `/api/offline-market/stats` | 概览聚合（代理后端 `/api/v1/stats`） |
 | GET | `/api/offline-market/agents?q=&page=&limit=` | 市场列表（代理后端） |
 | GET | `/api/offline-market/agents/mine` | 我的发布 |
@@ -455,6 +460,22 @@ New Task 按钮正下方、折叠菜单之外；页面顶部三个一级页签�
 3. 成功：显示 agent id、工作区路径
 4. 失败：显示失败步骤、原始错误；若发生回滚，明确写「已回滚」及保留的工作区路径
 5. 顶部常驻提示：智能体人设会改变助手行为；技能仍由宿主扫描，`block` 才拦得住恶意代码
+
+技能发布页按宿主导入流程重排（`发布` 页签）：
+
+1. 三步进度：选择压缩包 → 校验信息 → 发布完成
+2. 拖拽区也支持点击选择；`.zip` 一落地就换名称，标识符跟着名称重新推导（中文转拼音）
+3. 选完立刻**试运行**（`POST /api/offline-market/skills/inspect` → `POST /api/v1/skills/validate`），
+   一次列出全部问题：闸门（缺 `SKILL.md`、路径穿越、体积/数量超限）、标识符规则、
+   版本已存在、标识符属于别的团队、已被管理员下架
+4. 报告带 manifest 的名称/描述、文件数与体积，属主迭代时给 `next_version` 可一键填入
+5. 有问题时「立即发布」直接禁用，在填表阶段就改对；发布成功显示结果卡（可「再发布一个版本」）
+6. 版本/可见性改动会重跑试运行（版本冲突取决于它们）；同一份表单只干跑一次，不重复解包
+
+智能体发布页（`智能体 → 发布`）同样原地反馈：点「立即发布」后卡片里出现
+「正在打包并上传…已等待 Ns」（打包+上传只有一个请求，没有真进度，就报等待秒数），
+成功后换成结果卡（`slug@version · N 个文件 · M 个技能 · 可见性`），并给
+「再发布一个版本」（版本号自动 +1）/「发布另一个智能体」。失败时错误留在卡片里。
 
 发布页保护：**不展示也不上传** `MEMORY.md`、会话、记忆、模型、渠道、MCP、邮箱；
 发布前展示「将打包内容」摘要（人设文件名、技能名、文件数、大小）让作者确认。

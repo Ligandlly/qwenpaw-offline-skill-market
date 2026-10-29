@@ -90,51 +90,45 @@ pub fn check_agent_bundle(
     files: &BTreeMap<String, FileData>,
 ) -> Result<CheckedAgentBundle, Reject> {
     if files.is_empty() {
-        return Err(Reject::new("empty_bundle", "bundle contains no files"));
+        return Err(Reject::new("empty_bundle", "压缩包里没有任何文件"));
     }
     let manifest_file = files.get(AGENT_MANIFEST).ok_or_else(|| {
         Reject::new(
             "missing_manifest",
-            format!("bundle must contain {AGENT_MANIFEST} at its root"),
+            format!("压缩包根目录必须包含 {AGENT_MANIFEST}"),
         )
     })?;
     let manifest_text = manifest_file.as_text().ok_or_else(|| {
         Reject::new(
             "invalid_manifest",
-            format!("{AGENT_MANIFEST} must be UTF-8 text"),
+            format!("{AGENT_MANIFEST} 必须是 UTF-8 文本"),
         )
     })?;
     let manifest: AgentManifest = serde_json::from_str(manifest_text).map_err(|err| {
         Reject::new(
             "invalid_manifest",
-            format!("{AGENT_MANIFEST} is not valid JSON: {err}"),
+            format!("{AGENT_MANIFEST} 不是合法的 JSON：{err}"),
         )
     })?;
 
     if manifest.schema != 1 {
         return Err(Reject::new(
             "unsupported_schema",
-            format!(
-                "unsupported manifest schema {}; expected 1",
-                manifest.schema
-            ),
+            format!("不支持的 manifest schema {}，应为 1", manifest.schema),
         ));
     }
     if manifest.name.trim().is_empty() {
-        return Err(Reject::new("invalid_name", "agent name must not be empty"));
+        return Err(Reject::new("invalid_name", "智能体名称不能为空"));
     }
     if manifest.language.trim().is_empty() {
-        return Err(Reject::new(
-            "invalid_language",
-            "agent language must not be empty",
-        ));
+        return Err(Reject::new("invalid_language", "智能体语言不能为空"));
     }
     validate_profile(&manifest.profile)?;
 
     if manifest.md_files.is_empty() && manifest.skills.is_empty() {
         return Err(Reject::new(
             "empty_agent",
-            "agent bundle needs at least one markdown file or bundled skill",
+            "智能体包至少需要一个 markdown 文件或一个内置技能",
         ));
     }
 
@@ -143,22 +137,16 @@ pub fn check_agent_bundle(
         if !AGENT_MD_FILES.contains(&md.as_str()) {
             return Err(Reject::new(
                 "invalid_md_file",
-                format!(
-                    "{md}: only {} are allowed at the bundle root",
-                    AGENT_MD_FILES.join(", ")
-                ),
+                format!("{md}：根目录只允许 {}", AGENT_MD_FILES.join(", ")),
             ));
         }
         if !md_set.insert(md.as_str()) {
-            return Err(Reject::new(
-                "duplicate_md_file",
-                format!("{md}: listed more than once"),
-            ));
+            return Err(Reject::new("duplicate_md_file", format!("{md}：重复列出")));
         }
         if !files.contains_key(md) {
             return Err(Reject::new(
                 "missing_md_file",
-                format!("{md}: listed in md_files but missing from the bundle"),
+                format!("{md}：在 md_files 中声明，但包里没有该文件"),
             ));
         }
     }
@@ -168,16 +156,11 @@ pub fn check_agent_bundle(
         if !valid_skill_name(name) {
             return Err(Reject::new(
                 "invalid_skill_name",
-                format!(
-                    "{name}: skill names must be non-empty, at most 128 bytes, and free of path separators or control characters"
-                ),
+                format!("{name}：技能名不能为空、不超过 128 字节，且不含路径分隔符或控制字符"),
             ));
         }
         if !skill_set.insert(name.as_str()) {
-            return Err(Reject::new(
-                "duplicate_skill",
-                format!("{name}: listed more than once"),
-            ));
+            return Err(Reject::new("duplicate_skill", format!("{name}：重复列出")));
         }
         let skill_manifest = format!("skills/{name}/SKILL.md");
         let content = files
@@ -185,14 +168,14 @@ pub fn check_agent_bundle(
             .ok_or_else(|| {
                 Reject::new(
                     "missing_skill_manifest",
-                    format!("{skill_manifest}: declared skill has no SKILL.md"),
+                    format!("{skill_manifest}：声明的技能缺少 SKILL.md"),
                 )
             })?
             .as_text()
             .ok_or_else(|| {
                 Reject::new(
                     "invalid_skill_manifest",
-                    format!("{skill_manifest}: SKILL.md must be UTF-8 text"),
+                    format!("{skill_manifest}：SKILL.md 必须是 UTF-8 文本"),
                 )
             })?;
         limits::manifest_meta(content)?;
@@ -208,9 +191,7 @@ pub fn check_agent_bundle(
             if !md_set.contains(path.as_str()) {
                 return Err(Reject::new(
                     "unexpected_root_file",
-                    format!(
-                        "{path}: only {AGENT_MANIFEST} and declared md_files may live at the root"
-                    ),
+                    format!("{path}：根目录只允许 {AGENT_MANIFEST} 和已声明的 md_files"),
                 ));
             }
             continue;
@@ -221,19 +202,19 @@ pub fn check_agent_bundle(
         if root != "skills" {
             return Err(Reject::new(
                 "unexpected_path",
-                format!("{path}: non-markdown files must live under skills/<name>/"),
+                format!("{path}：非 markdown 文件必须放在 skills/<name>/ 下"),
             ));
         }
         if !skill_set.contains(skill) {
             return Err(Reject::new(
                 "undeclared_skill",
-                format!("{path}: skill '{skill}' is not declared in manifest.skills"),
+                format!("{path}：技能 '{skill}' 未在 manifest.skills 中声明"),
             ));
         }
         if parts.next().is_none() {
             return Err(Reject::new(
                 "invalid_path",
-                format!("{path}: a skill entry must be a file inside the skill directory"),
+                format!("{path}：技能下的条目必须是技能目录里的文件"),
             ));
         }
     }
@@ -254,7 +235,7 @@ fn validate_profile(profile: &AgentProfile) -> Result<(), Reject> {
         if !THINKING_LEVELS.contains(&level) {
             return Err(Reject::new(
                 "invalid_profile",
-                format!("unknown thinking_level '{level}'"),
+                format!("未知的 thinking_level '{level}'"),
             ));
         }
     }
@@ -268,7 +249,7 @@ fn validate_profile(profile: &AgentProfile) -> Result<(), Reject> {
     if !budget_ok {
         return Err(Reject::new(
             "invalid_profile",
-            "thinking_budget must be a positive integer and only with thinking_level=budget",
+            "thinking_budget 必须是正整数，且仅当 thinking_level=budget 时可用",
         ));
     }
     for tool in &profile.disabled_tools {
@@ -280,7 +261,7 @@ fn validate_profile(profile: &AgentProfile) -> Result<(), Reject> {
         if !valid {
             return Err(Reject::new(
                 "invalid_profile",
-                format!("invalid tool name '{tool}' in disabled_tools"),
+                format!("disabled_tools 中有不合法的工具名 '{tool}'"),
             ));
         }
     }
@@ -302,7 +283,7 @@ fn valid_skill_name(name: &str) -> bool {
         && !name.chars().any(|c| c.is_control())
 }
 
-/// Slug for an agent whose display name has no ASCII slug form (e.g. Chinese).
+/// Slug for an agent whose display name has no ASCII slug form (e.g. emoji).
 /// Stable across versions so republishing reuses the same market entry.
 fn agent_slug(name: &str) -> String {
     if let Some(slug) = derive_slug(name) {
@@ -315,6 +296,23 @@ fn agent_slug(name: &str) -> String {
         .map(|byte| format!("{byte:02x}"))
         .collect();
     format!("agent-{suffix}")
+}
+
+/// Slug this tenant already published under the same display name, if any.
+///
+/// Chinese names used to derive `agent-<sha256>` and now derive pinyin, so
+/// without this a republish after the upgrade would create a *second* entry for
+/// an agent that is already on the market. Same tenant + same name only, so it
+/// cannot reach into someone else's listing.
+fn existing_agent_slug(app: &Shared, tenant: &str, name: &str) -> Option<String> {
+    let db = app.db();
+    db.query_row(
+        "SELECT slug FROM agents WHERE owner_tenant = ?1 AND name = ?2
+         ORDER BY created_at LIMIT 1",
+        params![tenant, name.trim()],
+        |row| row.get(0),
+    )
+    .ok()
 }
 
 // ---------------------------------------------------------------- listings ---
@@ -505,12 +503,12 @@ pub async fn agent_status(
         .map_err(ApiError::db)?;
     let mut rows = stmt.query(params![slug]).map_err(ApiError::db)?;
     let Some(row) = rows.next().map_err(ApiError::db)? else {
-        return Err(ApiError::not_found("unknown agent"));
+        return Err(ApiError::not_found("智能体不存在"));
     };
     let owner: String = row.get("owner_tenant").map_err(ApiError::db)?;
     let visibility: String = row.get("visibility").map_err(ApiError::db)?;
     if owner != tenant.0 && visibility != "public" {
-        return Err(ApiError::not_found("unknown agent"));
+        return Err(ApiError::not_found("智能体不存在"));
     }
     let withdrawn_at: Option<i64> = row.get("withdrawn_at").map_err(ApiError::db)?;
     let takedown_at: Option<i64> = row.get("takedown_at").map_err(ApiError::db)?;
@@ -558,14 +556,14 @@ pub async fn publish(
         return Err(ApiError::new(
             StatusCode::BAD_REQUEST,
             "invalid_visibility",
-            "visibility must be 'public' or 'tenant'",
+            "可见范围只能是 public 或 tenant",
         ));
     }
     if !limits::valid_version(&body.version) {
         return Err(ApiError::new(
             StatusCode::BAD_REQUEST,
             "invalid_version",
-            "version must be 1-32 chars of [0-9A-Za-z.+-] and start alphanumeric",
+            "版本号需为 1-32 位，只能包含 0-9 A-Z a-z . + -，且以字母或数字开头",
         ));
     }
 
@@ -590,13 +588,14 @@ pub async fn publish(
         .filter(|slug| !slug.is_empty())
     {
         Some(slug) => slug.to_string(),
-        None => agent_slug(&checked.manifest.name),
+        None => existing_agent_slug(&app, &tenant.0, &checked.manifest.name)
+            .unwrap_or_else(|| agent_slug(&checked.manifest.name)),
     };
     if !limits::valid_slug(&slug) {
         return Err(ApiError::new(
             StatusCode::BAD_REQUEST,
             "invalid_slug",
-            "slug must be 1-64 chars of [a-z0-9-] and start alphanumeric",
+            "标识符需为 1-64 位，只能包含小写字母、数字和 -，且以字母或数字开头",
         ));
     }
 
@@ -630,13 +629,13 @@ pub async fn publish(
                 "agent publish rejected: slug belongs to another tenant"
             );
             return Err(ApiError::forbidden(format!(
-                "slug '{slug}' already belongs to another tenant"
+                "标识符 '{slug}' 已被其他团队占用"
             )));
         }
         if takedown_at.is_some() {
             return Err(ApiError::conflict(
                 "taken_down",
-                "this agent was taken down by an administrator; publishing is blocked",
+                "该智能体已被管理员下架，不能再发布",
             ));
         }
     }
@@ -686,7 +685,10 @@ pub async fn publish(
         );
         return Err(ApiError::conflict(
             "version_exists",
-            format!("version {} already exists and is immutable", body.version),
+            format!(
+                "版本 {} 已存在且不可修改，请不要重复发布同一个版本号",
+                body.version
+            ),
         ));
     }
 
@@ -781,15 +783,12 @@ pub async fn withdraw(
             params![slug],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
-        .map_err(|_| ApiError::not_found("unknown agent"))?;
+        .map_err(|_| ApiError::not_found("智能体不存在"))?;
     if owner != tenant.0 {
-        return Err(ApiError::forbidden("only the owning tenant may withdraw"));
+        return Err(ApiError::forbidden("只有发布者所在团队才能下架"));
     }
     if takedown_at.is_some() {
-        return Err(ApiError::conflict(
-            "taken_down",
-            "already taken down by an administrator",
-        ));
+        return Err(ApiError::conflict("taken_down", "该条目已被管理员下架"));
     }
     db.execute(
         "UPDATE agents SET withdrawn_at = ?2, withdrawn_by = ?3 WHERE slug = ?1",
@@ -822,14 +821,14 @@ pub async fn restore(
             params![slug],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
-        .map_err(|_| ApiError::not_found("unknown agent"))?;
+        .map_err(|_| ApiError::not_found("智能体不存在"))?;
     if owner != tenant.0 {
-        return Err(ApiError::forbidden("only the owning tenant may restore"));
+        return Err(ApiError::forbidden("只有发布者所在团队才能重新上架"));
     }
     if takedown_at.is_some() {
         return Err(ApiError::conflict(
             "taken_down",
-            "an administrator took this agent down; it cannot be self-restored",
+            "该智能体由管理员下架，不能自行恢复上架",
         ));
     }
     db.execute(
@@ -881,13 +880,13 @@ pub async fn fetch_bundle(
                 ))
             },
         )
-        .map_err(|_| ApiError::new(StatusCode::GONE, "gone", "unknown agent"))?;
+        .map_err(|_| ApiError::new(StatusCode::GONE, "gone", "智能体不存在"))?;
 
     if takedown_at.is_some() {
         return Err(ApiError::new(
             StatusCode::GONE,
             "taken_down",
-            "this agent was taken down by an administrator and can no longer be downloaded",
+            "该智能体已被管理员下架，无法再下载",
         ));
     }
     let is_owner = owner == tenant.0;
@@ -895,15 +894,15 @@ pub async fn fetch_bundle(
         return Err(ApiError::new(
             StatusCode::GONE,
             "withdrawn",
-            "the publisher withdrew this agent",
+            "发布者已撤回该智能体",
         ));
     }
     if visibility != "public" && !is_owner {
-        return Err(ApiError::forbidden("this agent is private to its tenant"));
+        return Err(ApiError::forbidden("该智能体仅对所属团队可见"));
     }
 
     let resolved = if version == "latest" {
-        latest.ok_or_else(|| ApiError::new(StatusCode::GONE, "gone", "no published version"))?
+        latest.ok_or_else(|| ApiError::new(StatusCode::GONE, "gone", "还没有已发布的版本"))?
     } else {
         version
     };
@@ -916,13 +915,13 @@ pub async fn fetch_bundle(
             params![slug, resolved],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
-        .map_err(|_| ApiError::not_found("unknown version"))?;
+        .map_err(|_| ApiError::not_found("版本不存在"))?;
 
     let files: BTreeMap<String, FileData> = serde_json::from_str(&bundle_json).map_err(|err| {
         ApiError::new(
             StatusCode::INTERNAL_SERVER_ERROR,
             "corrupt_bundle",
-            format!("stored agent bundle is unreadable: {err}"),
+            format!("存储的智能体包无法读取：{err}"),
         )
     })?;
 
@@ -1022,7 +1021,7 @@ pub async fn admin_takedown(
         return Err(ApiError::new(
             StatusCode::NOT_FOUND,
             "not_found",
-            "unknown agent",
+            "智能体不存在",
         ));
     }
     audit_kind(
@@ -1062,7 +1061,7 @@ pub async fn admin_restore(
         return Err(ApiError::new(
             StatusCode::NOT_FOUND,
             "not_found",
-            "unknown agent",
+            "智能体不存在",
         ));
     }
     audit_kind(

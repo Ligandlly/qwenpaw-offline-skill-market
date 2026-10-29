@@ -20,7 +20,7 @@
 | 目录 | 内容 |
 | --- | --- |
 | `backend/` | 市场后端：Rust + axum + rusqlite（SQLite bundled），53 个测试 |
-| `plugin/` | QwenPaw 2.2.2 插件：技能/智能体市场路由 + 侧边栏页面（卡片/列表目录 + 概览 Dashboard），108 个测试 |
+| `plugin/` | QwenPaw 2.2.2 插件：技能/智能体市场路由 + 侧边栏页面（卡片/列表目录 + 概览 Dashboard），111 个测试 |
 | `deploy/` | docker-compose / systemd / 离线打包 / preflight / 端到端验收脚本 |
 | `docs/` | `OPS.md` 部署运维手册、`ACCEPTANCE.md` 验收标准、`AGENT_MARKET.md` 智能体市场设计与契约 |
 | `spikes/` | M0 阶段对 2.2.2 的实证结论（11 条）、浏览器验证脚本与无头 UI 冒烟脚本 |
@@ -115,7 +115,7 @@ python3 deploy/scripts/preflight.py --market-url ... --runtimes-dir ... --app-ur
 | --- | --- | --- |
 | `backend.yml` | 改动 `backend/**`、推 tag `v*`、手动 | `cargo fmt --check` → `clippy -D warnings` → `cargo test --all-targets` → release 构建 → 上传 artifact；**推 `v*` tag 时自动建 Release 并附二进制 tarball + sha256** |
 | `backend-image.yml` | 改动 `backend/**`、推 tag `v*`、手动 | 跑一遍测试 → 构建后端镜像（linux/amd64）→ **推 ghcr.io** → 导出 `docker save` tarball 上传 artifact（tag 时也挂到 Release）；PR 只构建不推送 |
-| `plugin.yml` | 改动 `plugin/**`、手动 | `pytest`（108 项，不装 QwenPaw、不联网）+ `compileall` |
+| `plugin.yml` | 改动 `plugin/**`、手动 | `pytest`（111 项，不装 QwenPaw、不联网）+ `compileall` |
 | `plugin-package.yml` | 改动 `plugin/**`、推 tag `v*`、手动 | `pytest` → 打离线插件 zip（`dist/offline-market-plugin-<ver>-linux-x86_64.zip` + sha256）→ 解压后 `compileall` 复验 → 上传 artifact（tag 时挂到 Release） |
 
 发一个版本：

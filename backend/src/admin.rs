@@ -75,14 +75,14 @@ impl FromRequestParts<Shared> for Admin {
             ApiError::new(
                 StatusCode::UNAUTHORIZED,
                 "admin_login_required",
-                "admin session cookie is missing",
+                "缺少管理员会话 Cookie，请重新登录",
             )
         })?;
         let username = app.sessions().username_for(&token).ok_or_else(|| {
             ApiError::new(
                 StatusCode::UNAUTHORIZED,
                 "admin_session_expired",
-                "admin session is invalid or expired",
+                "管理员会话无效或已过期，请重新登录",
             )
         })?;
         Ok(Admin(username))
@@ -128,7 +128,7 @@ pub async fn login(
         return Err(ApiError::new(
             StatusCode::UNAUTHORIZED,
             "invalid_credentials",
-            "invalid username or password",
+            "用户名或密码错误",
         ));
     }
     let token = app.sessions().issue(&body.username);
@@ -254,7 +254,7 @@ pub async fn takedown(
         return Err(ApiError::new(
             StatusCode::NOT_FOUND,
             "not_found",
-            "unknown skill",
+            "技能不存在",
         ));
     }
     info!(
@@ -294,7 +294,7 @@ pub async fn restore(
         return Err(ApiError::new(
             StatusCode::NOT_FOUND,
             "not_found",
-            "unknown skill",
+            "技能不存在",
         ));
     }
     info!(admin = %admin.0, slug = %slug, "takedown revoked");
@@ -369,7 +369,7 @@ fn internal(err: rusqlite::Error) -> ApiError {
     ApiError::new(
         StatusCode::INTERNAL_SERVER_ERROR,
         "db_error",
-        format!("database error: {err}"),
+        format!("数据库错误：{err}"),
     )
 }
 

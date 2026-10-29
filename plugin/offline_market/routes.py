@@ -198,6 +198,14 @@ def build_router(settings: PluginSettings):
             return {"items": []}
         return call(client().lookup, wanted)
 
+    @router.get("/derive-slug")
+    def derive_slug(name: str = "") -> Any:
+        """标识符 for a display name; used to prefill the publish form.
+
+        Pure lookup (no writes) so the page can call it while the user types.
+        """
+        return call(client().derive_slug, name)
+
     @router.get("/skills/{slug}/status")
     def skill_status(slug: str) -> Any:
         return call(client().status, slug)
@@ -244,6 +252,48 @@ def build_router(settings: PluginSettings):
             version=version,
             visibility=str(payload.get("visibility") or "public"),
             publisher_name=clean_publisher_name(payload.get("publisher_name")),
+            files=files,
+        )
+
+    @router.post("/skills/inspect")
+    def inspect_zip(
+        payload: bytes = Body(..., media_type="application/zip"),
+        name: str = "",
+        slug: str = "",
+        version: str = "",
+        visibility: str = "public",
+    ) -> Any:
+        """Dry run of a publish for one uploaded ``.zip`` (publish-form preview).
+
+        Same extraction and the same backend rules as :func:`publish_zip`, but
+        nothing is stored: the page shows the parsed manifest, the file sizes and
+        every problem at once while the user is still filling in the form.
+        """
+        try:
+            files = wire_files(extract_zip(payload))
+        except BundleError as exc:
+            # Still a report, not an HTTP error: the form renders it in place.
+            return {
+                "ok": False,
+                "slug": slug.strip() or None,
+                "name": name.strip(),
+                "version": version.strip(),
+                "visibility": visibility.strip() or "public",
+                "file_count": 0,
+                "size_bytes": 0,
+                "files": [],
+                "manifest": None,
+                "existing": None,
+                "next_version": None,
+                "limits": None,
+                "problems": [{"code": exc.code, "message": str(exc)}],
+            }
+        return call(
+            client().validate,
+            name=name.strip(),
+            slug=slug.strip() or None,
+            version=version.strip(),
+            visibility=visibility.strip() or "public",
             files=files,
         )
 
