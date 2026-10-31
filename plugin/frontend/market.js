@@ -770,6 +770,23 @@ whenHost((paw) => {
     return settled;
   }
 
+  /**
+   * Run `reset` when a screen becomes visible again.
+   *
+   * antd's Tabs mounts a pane on first visit and afterwards only hides it, so a
+   * screen that ends on a terminal state (the 「发布成功」 card) still shows that
+   * state after the user leaves and comes back. The publish pages want the
+   * upload form back instead; this hook fires on the hidden → visible edge only,
+   * so a form that is still being filled in is never disturbed.
+   */
+  function useResetOnShow(visible, reset) {
+    const wasVisible = useRef(visible);
+    useEffect(() => {
+      if (visible && !wasVisible.current) reset();
+      wasVisible.current = visible;
+    }, [visible, reset]);
+  }
+
   function useCatalogue({ kind, refreshToken, onNotice }) {
     const [items, setItems] = useState([]);
     const [total, setTotal] = useState(0);
@@ -1670,7 +1687,7 @@ whenHost((paw) => {
     );
   }
 
-  function PublishTab({ limits, onNotice, onPublished }) {
+  function PublishTab({ limits, onNotice, onPublished, active = true }) {
     const { palette } = useMarketTheme();
     const [name, setName] = useState("");
     const [slug, setSlug] = useState("");
@@ -1689,6 +1706,10 @@ whenHost((paw) => {
     const [dragging, setDragging] = useState(false);
     const [busy, setBusy] = useState(false);
     const [result, setResult] = useState(null);
+    // 切走再切回来时收掉「发布成功」卡：绕一圈回来期待的仍是上传表单。名称/
+    // 版本留在原处，接着发下一个版本是最常见的动作。
+    const clearResult = useCallback(() => setResult(null), []);
+    useResetOnShow(active, clearResult);
     const publisherName = useCurrentUserName();
     const derivedName = useDebounced(name, 300);
     const stableSlug = useDebounced(slug, 500);
@@ -2779,7 +2800,7 @@ whenHost((paw) => {
     );
   }
 
-  function AgentPublishTab({ onNotice, onPublished }) {
+  function AgentPublishTab({ onNotice, onPublished, active = true }) {
     const { palette } = useMarketTheme();
     const [agents, setAgents] = useState([]);
     const [loadingAgents, setLoadingAgents] = useState(true);
@@ -2795,6 +2816,9 @@ whenHost((paw) => {
     const [result, setResult] = useState(null);
     const [elapsed, setElapsed] = useState(0);
     const [error, setError] = useState("");
+    // 跟技能发布页一致：切走再切回来，重新显示发布表单而不是上次的成功卡。
+    const clearResult = useCallback(() => setResult(null), []);
+    useResetOnShow(active, clearResult);
     const publisherName = useCurrentUserName();
 
     // 没有真进度可拿（一次打包+上传就一个请求），就把等待秒数报出来。
@@ -3381,8 +3405,10 @@ whenHost((paw) => {
         : h("div", null, items.length, " 个已安装智能体");
   }
 
-  function AgentMarketPage({ config, onNotice }) {
+  function AgentMarketPage({ config, onNotice, active = true }) {
     const [marketToken, setMarketToken] = useState(0);
+    // See SkillsPage: a mounted pane must know when it is back in view.
+    const [activeKey, setActiveKey] = useState("market");
     const [revision, setRevision] = useState(0);
     const [installed, setInstalled] = useState(() => new Set());
     const [installedVersions, setInstalledVersions] = useState(() => ({}));
@@ -3468,7 +3494,11 @@ whenHost((paw) => {
       {
         key: "publish",
         label: "发布",
-        children: h(AgentPublishTab, { onNotice, onPublished }),
+        children: h(AgentPublishTab, {
+          onNotice,
+          onPublished,
+          active: active && activeKey === "publish",
+        }),
       },
       {
         key: "mine",
@@ -3497,15 +3527,22 @@ whenHost((paw) => {
           "人设与配置来自市场；捆绑技能仍由 QwenPaw 宿主扫描安装。卸载只摘除配置，不删除工作区。",
       }),
       Tabs
-        ? h(Tabs, { items: tabs, defaultActiveKey: "market" })
+        ? h(Tabs, {
+            items: tabs,
+            defaultActiveKey: "market",
+            onChange: (key) => setActiveKey(key),
+          })
         : h("div", null, tabs.map((tab) => h("section", { key: tab.key }, tab.children))),
     );
   }
 
   // ------------------------------------------------------------------ page ---
 
-  function SkillsPage({ config, limits, onNotice }) {
+  function SkillsPage({ config, limits, onNotice, active = true }) {
     const [refreshToken, setRefreshToken] = useState(0);
+    // Which inner tab is on screen. antd keeps every visited pane mounted and
+    // only hides it, so the 发布 pane needs to know when it is back in view.
+    const [activeKey, setActiveKey] = useState("market");
     // Bumped only by a publish: refreshes the market list once without the
     // spinner flash that a tab switch would cause.
     const [marketToken, setMarketToken] = useState(0);
@@ -3536,7 +3573,13 @@ whenHost((paw) => {
       {
         key: "publish",
         label: "发布",
-        children: h(PublishTab, { limits, onNotice, onPublished }),
+        children: h(PublishTab, {
+          limits,
+          onNotice,
+          onPublished,
+          // 外层页签也算：技能 ↔ 智能体 ↔ 概览切回来同样是「重新进入」。
+          active: active && activeKey === "publish",
+        }),
       },
       {
         key: "mine",
@@ -3551,7 +3594,11 @@ whenHost((paw) => {
     ];
 
     return Tabs
-      ? h(Tabs, { items: tabs, defaultActiveKey: "market" })
+      ? h(Tabs, {
+          items: tabs,
+          defaultActiveKey: "market",
+          onChange: (key) => setActiveKey(key),
+        })
       : h("div", null, tabs.map((tab) => h("section", { key: tab.key }, tab.children)));
   }
 
@@ -4211,6 +4258,7 @@ whenHost((paw) => {
   function MarketPage() {
     const { config, limits, error, setError } = useMarketData();
     const [notice, setNotice] = useState(null);
+    const [activeKey, setActiveKey] = useState("skills");
 
     const onNotice = useCallback((value) => {
       logger.debug(`通知 [${value.type}] ${value.text}`);
@@ -4224,12 +4272,12 @@ whenHost((paw) => {
       {
         key: "skills",
         label: "技能",
-        children: h(SkillsPage, { config, limits, onNotice }),
+        children: h(SkillsPage, { config, limits, onNotice, active: activeKey === "skills" }),
       },
       {
         key: "agents",
         label: "智能体",
-        children: h(AgentMarketPage, { config, onNotice }),
+        children: h(AgentMarketPage, { config, onNotice, active: activeKey === "agents" }),
       },
       {
         key: "overview",
@@ -4252,7 +4300,10 @@ whenHost((paw) => {
             defaultActiveKey: "skills",
             // A tab switch must not refetch: the pane mounts on first visit and
             // refreshing here used to run the whole N+1 fan-out twice.
-            onChange: () => setError(null),
+            onChange: (key) => {
+              setActiveKey(key);
+              setError(null);
+            },
           })
         : h("div", null, tabs.map((tab) => h("section", { key: tab.key }, tab.children))),
     );

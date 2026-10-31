@@ -78,10 +78,11 @@ npm install --prefix /tmp/harness react@18 react-dom@18 antd@5 jsdom   # 一次�
 node spikes/ui_smoke.mjs
 ```
 
-用真实 `market.js` + 伪 `window.QwenPaw.host` + 伪插件 API 渲染整个市场页，覆盖 31 项：
+用真实 `market.js` + 伪 `window.QwenPaw.host` + 伪插件 API 渲染整个市场页，覆盖 36 项：
 卡片视图与结果计数、`安装/更新` 徽标（1.0.0 → 1.2.0）、详情抽屉、触底加载第 2 页、
 300ms 防抖搜索、排序下拉改 `sort=downloads`、列表视图、502 错误态、智能体安装弹窗、
-安装后已安装页自动刷新、暗色主题重渲染，以及**正常流程 0 console error**。输出 `ALL CHECKS PASSED` 才算通过。
+安装后已安装页自动刷新、发布成功卡（发布 → 切页签 → 回来应重新显示上传表单；内外两层页签都验）、
+暗色主题重渲染，以及**正常流程 0 console error**。输出 `ALL CHECKS PASSED` 才算通过。
 
 ## 5. 部署自检（只读）
 

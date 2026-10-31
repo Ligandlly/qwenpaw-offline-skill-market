@@ -212,6 +212,16 @@ globalThis.fetch = window.fetch = async (url, init) => {
     return json({ status: "completed", result: { name: "Skill 44" } });
   }
   if (pathname === "/api/skills") return json({ items: installedSkills });
+  // publish flow (发布 tab)
+  if (pathname === "/api/offline-market/derive-slug") return json({ slug: "demo" });
+  if (pathname === "/api/offline-market/mine") return json({ items: [] });
+  if (pathname === "/api/auth/verify") return json({ username: "平台组" });
+  if (pathname === "/api/offline-market/skills/inspect") {
+    return json({ problems: [], file_count: 2, manifest: { name: "Demo" }, existing: null, next_version: "1.0.1" });
+  }
+  if (pathname === "/api/offline-market/skills/zip") {
+    return json({ slug: "demo", version: "1.0.0", file_count: 2 });
+  }
   if (pathname === "/api/skills/Alpha" || pathname === "/api/skills/alpha") {
     return json({ name: "Alpha", installed_from: "offline-market", version_text: "1.0.0", source: "user" });
   }
@@ -385,6 +395,32 @@ expect(
   `安装后已安装页自动刷新（${pane().textContent.replace(/\s+/g, " ").slice(0, 140)}）`,
 );
 
+// 发布成功后切到别的页签再回来：antd 的页签只隐藏不卸载，发布页曾经会把
+// 「发布成功」卡一直留在那里，用户回来看不到上传表单。
+innerTab("发布").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+await sleep(800);
+expect(flat().includes("点击选择或把 .zip 拖到这里"), "发布页首次进入是上传表单");
+const fileInput = pane().querySelector('input[type="file"]');
+const zip = new window.File([new Uint8Array([80, 75, 3, 4])], "Demo.zip", { type: "application/zip" });
+Object.defineProperty(fileInput, "files", { value: [zip], configurable: true });
+fileInput.dispatchEvent(new window.Event("change", { bubbles: true }));
+await sleep(1200);
+expect(flat().includes("Demo.zip"), "选包后显示压缩包名");
+clickButton("立即发布");
+await sleep(1500);
+expect(flat().includes("发布成功"), "发布成功后在原地显示结果卡");
+innerTab("我的发布").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+await sleep(900);
+innerTab("发布").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+await sleep(700);
+expect(!flat().includes("发布成功"), "切走再回到发布页，结果卡已收掉");
+expect(
+  flat().includes("点击选择或把 .zip 拖到这里"),
+  `回到发布页重新显示上传表单（${pane().textContent.replace(/\s+/g, " ").slice(0, 120)}）`,
+);
+innerTab("市场").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+await sleep(600);
+
 // the happy path must not log a single error
 expect(errors.length === 0, "正常流程 0 console error");
 
@@ -422,6 +458,35 @@ root.render(
 );
 await sleep(900);
 expect(flat().length > 100, "暗色主题渲染完成");
+
+// 外层页签（技能 ↔ 智能体）切回来同样是「重新进入」：两个层级都要算在内。
+// 发在最后：它会把智能体页挂载起来，而上面对页面范围的断言只认技能页。
+const outerTab = (label) =>
+  [...document.querySelectorAll('[role="tab"]')].find(
+    (node) => node.textContent.replace(/\s+/g, "") === label,
+  );
+const skillsPublishPane = () =>
+  [...document.querySelectorAll(".ant-tabs-tabpane")].find((node) =>
+    /技能压缩包|已在市场中/.test(node.textContent),
+  );
+innerTab("发布").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+await sleep(800);
+const zipAgain = skillsPublishPane().querySelector('input[type="file"]');
+Object.defineProperty(zipAgain, "files", { value: [zip], configurable: true });
+zipAgain.dispatchEvent(new window.Event("change", { bubbles: true }));
+await sleep(1200);
+const publishAgain = [...skillsPublishPane().querySelectorAll("button")].find((b) =>
+  b.textContent.replace(/\s+/g, "").includes("立即发布"),
+);
+expect(Boolean(publishAgain), "回到发布页仍能选包并发布");
+publishAgain.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+await sleep(1500);
+expect(flat().includes("发布成功"), "再次发布后在原地显示结果卡");
+outerTab("智能体").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+await sleep(900);
+outerTab("技能").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+await sleep(900);
+expect(!flat().includes("发布成功"), "切到智能体再回技能，发布结果卡同样收掉");
 
 console.log("--- requests ---");
 console.log([...new Set(requests)].join("\n"));

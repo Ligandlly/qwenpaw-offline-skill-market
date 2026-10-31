@@ -106,7 +106,7 @@
   - **v0.1.6 修复**：技能/智能体安装成功后递增 `refreshToken`（`MarketTab`/`AgentMarketTab` 的 `onInstalled` →
     `SkillsPage`/`AgentMarketPage`），已安装页不再停留在首次挂载时的快照；同时修正 `spikes/ui_smoke.mjs` 的
     `pane()`（取最内层可见 tabpane）与安装状态 mock（`completed`），新增「安装后已安装页自动刷新」断言
-  - 无宿主环境的等价验证：`spikes/ui_smoke.mjs`（jsdom + 真 antd + 伪宿主，31 项断言）；`m3_verify.py` 增补目录交互与列表契约断言
+  - 无宿主环境的等价验证：`spikes/ui_smoke.mjs`（jsdom + 真 antd + 伪宿主，36 项断言）；`m3_verify.py` 增补目录交互与列表契约断言
   - 新发现（已修）：宿主技能列表 `source` 恒为 `customized`、`installed_from` 只在详情里、安装目录名是展示名而非 slug → 新增 `/api/v1/skills/lookup`
 - **M4** 离线 e2e + docker-compose / 裸二进制部署包 + 运维文档（含扫描模式：`block` 推荐，`warn` 允许）—— **已完成（智能体 Docker phase C 需在有 docker 权限的宿主机执行）**
 
