@@ -4,7 +4,7 @@
 mod common;
 
 use axum::http::StatusCode;
-use common::{Harness, GOOD_MANIFEST};
+use common::{find, Harness, GOOD_MANIFEST};
 use serde_json::json;
 
 #[tokio::test]
@@ -909,4 +909,39 @@ async fn validate_reports_every_problem_without_publishing() {
     assert_eq!(body["problems"][0]["code"], "slug_taken");
     assert_eq!(body["existing"]["mine"], false);
     assert!(body["next_version"].is_null());
+}
+
+/// The `latest` pointer is advanced with `compare_versions(...).is_gt()`, so a
+/// prerelease must sort below its own release in both directions: publishing
+/// `1.0.0` after `1.0.0-beta` has to move the pointer, and a later
+/// `1.0.0-rc.2` must not drag it back.
+#[tokio::test]
+async fn latest_moves_from_a_prerelease_to_its_release() {
+    let h = Harness::new();
+    h.publish_skill("tenant-a", "pre", "1.0.0-beta", "public").await;
+    let (_, listing, _) = h
+        .call("GET", "/api/v1/skills", Some("tenant-b"), None, None)
+        .await;
+    assert_eq!(find(&listing, "pre")["latest_version"], "1.0.0-beta");
+
+    let (status, body) = h.publish_skill("tenant-a", "pre", "1.0.0", "public").await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(body["latest_version"], "1.0.0", "{body}");
+    let (_, listing, _) = h
+        .call("GET", "/api/v1/skills", Some("tenant-b"), None, None)
+        .await;
+    assert_eq!(find(&listing, "pre")["latest_version"], "1.0.0");
+
+    // A prerelease of the version already at the top is *older*: no advance.
+    let (status, body) = h
+        .publish_skill("tenant-a", "pre", "1.0.0-rc.2", "public")
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(body["latest_version"], "1.0.0", "{body}");
+    let (status, bundle) = h
+        .download("/api/v1/skills/pre/latest/bundle", Some("tenant-b"))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let bundle: serde_json::Value = serde_json::from_slice(&bundle).unwrap();
+    assert_eq!(bundle["version"], "1.0.0");
 }
