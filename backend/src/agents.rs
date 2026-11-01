@@ -8,7 +8,8 @@
 //! frontmatter (the host refuses installs without it).
 
 use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
+use axum::response::Response;
 use axum::Json;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -18,6 +19,7 @@ use tracing::{debug, error, info, warn};
 use crate::slug::clean_publisher_name;
 use crate::dto::{default_visibility, fifty, ListQuery, LookupQuery};
 use crate::db;
+use crate::http;
 use crate::error::{ApiError, ApiResult};
 use crate::auth::{Admin, TenantId};
 use crate::limits::{self, FileData, Reject};
@@ -617,20 +619,24 @@ pub async fn fetch_bundle(
     State(app): State<Shared>,
     tenant: TenantId,
     Path((slug, version)): Path<(String, String)>,
-) -> ApiResult<Json<Value>> {
+    headers: HeaderMap,
+) -> ApiResult<Response> {
     db::offload(&app, move |app| {
         let db = app.db();
         let payload = market::bundle(app, &db, &market::AGENT, &tenant.0, &slug, &version)?;
-        Ok(json!({
+        if !http::is_revalidated(&headers, &payload.sha256) {
+            app.pending().add_download(market::AGENT.table, &slug);
+        }
+        let body = json!({
             "name": payload.name,
             "description": payload.description,
             "version": payload.version,
             "files": payload.files,
             "source_url": payload.source_url,
-        }))
+        });
+        http::immutable_json(&body, &payload.sha256, payload.visibility == "public", &headers)
     })
     .await
-    .map(Json)
 }
 
 // ------------------------------------------------------------------ admin ---

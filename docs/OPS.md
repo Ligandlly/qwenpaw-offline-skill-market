@@ -24,7 +24,7 @@
 cp deploy/.env.example deploy/.env     # 必改：ADMIN_PASSWORD、MARKET_PUBLIC_URL
 vi deploy/.env
 docker compose -f deploy/docker-compose.yml up -d      # 不需要 --env-file
-curl -s http://localhost:8080/health
+curl -s http://localhost:8080/health    # {"status":"ok","database":"ok"}；数据库不可用时 503 + status=degraded
 ```
 
 **用 ghcr 上的预构建镜像**（省掉本地编译，内网机器尤其省事）：

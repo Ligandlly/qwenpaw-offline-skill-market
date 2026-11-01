@@ -213,6 +213,11 @@ pub(crate) struct BundlePayload {
     pub version: String,
     pub files: BTreeMap<String, FileData>,
     pub source_url: String,
+    /// Digest of the stored payload, served as the `ETag`.
+    pub sha256: String,
+    /// `public` or `tenant`; decides whether the response may be cached by a
+    /// shared cache.
+    pub visibility: String,
 }
 
 /// `GET …/{slug}/{version}/bundle`: the download path, shared end to end.
@@ -289,14 +294,14 @@ pub(crate) fn bundle(
         version.to_string()
     };
 
-    let bundle_json: String = db
+    let (bundle_json, sha256): (String, String) = db
         .query_row(
             &format!(
-                "SELECT bundle_json FROM {} WHERE slug = ?1 AND version = ?2",
+                "SELECT bundle_json, sha256 FROM {} WHERE slug = ?1 AND version = ?2",
                 entity.version_table
             ),
             params![slug, resolved],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .map_err(|err| ApiError::query_miss(err, "版本不存在"))?;
 
@@ -309,10 +314,6 @@ pub(crate) fn bundle(
     })?;
 
     let (name, description) = labels_of(entity, &files, &row_name)?;
-
-    // Counted in memory and written back by `crate::counters`: a download must
-    // not need the write lock, and must never fail because of its counter.
-    app.pending().add_download(entity.table, slug);
 
     debug!(
         tenant = %tenant,
@@ -328,6 +329,8 @@ pub(crate) fn bundle(
         source_url: (entity.bundle_url)(&app.cfg.public_url, slug, &resolved),
         version: resolved,
         files,
+        sha256,
+        visibility,
     })
 }
 

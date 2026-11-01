@@ -197,6 +197,33 @@ impl Harness {
 
     /// GET a bundle and return its body bytes untouched (the hub hands these
     /// to the host, so byte-level identity is part of the contract).
+    /// A GET with extra request headers — how the conditional and negotiated
+    /// requests of a real client reach the handlers.
+    pub async fn call_headers(
+        &self,
+        uri: &str,
+        tenant: Option<&str>,
+        headers: &[(&str, &str)],
+    ) -> (StatusCode, HeaderMap, Bytes) {
+        let mut builder = Request::builder().method("GET").uri(uri);
+        if let Some(tenant) = tenant {
+            builder = builder.header("x-tenant-id", tenant);
+        }
+        for (name, value) in headers {
+            builder = builder.header(*name, *value);
+        }
+        let response = self
+            .app
+            .clone()
+            .oneshot(builder.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let reply = response.headers().clone();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        (status, reply, bytes)
+    }
+
     pub async fn download(
         &self,
         uri: &str,

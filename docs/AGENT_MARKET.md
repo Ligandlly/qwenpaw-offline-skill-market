@@ -229,6 +229,8 @@ ALTER TABLE audit_log ADD COLUMN kind TEXT NOT NULL DEFAULT 'skill';  -- migrate
 | GET | `/api/v1/slug?name=` | 标识符推导（中文名转拼音），发布表单用它预填 |
 | POST | `/api/v1/skills/validate` | 发布前干跑（只读）：闸门问题全量清单 + manifest + 体积 + 版本冲突 + 建议版本 |
 
+`GET …/bundle` 与技能面共用同一套缓存语义（`ETag` 取版本 `sha256`、`304` 不计数、`gzip`、`Vary: X-Tenant-Id, Accept-Encoding`）。
+
 智能体面的 `validate` / `lookup` / `status` / `mine` 与技能面同构（共用 `market.rs` 的投影与校验），差异只有：智能体的名称来自包内 `manifest.json`，技能的名称来自发布请求的 `name`。
 
 发布请求体（`name` / `description` 以包内 `manifest.json` 为准，避免两处不一致）。

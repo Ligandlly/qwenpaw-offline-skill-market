@@ -129,3 +129,165 @@ async fn a_panicking_query_fails_one_request_not_the_runtime() {
         .await;
     assert_eq!(status, StatusCode::OK, "{body}");
 }
+
+/// A published version never changes, so its payload is cacheable forever and
+/// revalidating it is free: the digest the publish computed is the validator.
+#[tokio::test]
+async fn bundle_responses_revalidate_on_their_digest() {
+    let h = Harness::new();
+    let (status, body) = h.publish_skill("tenant-a", "demo", "1.0.0", "public").await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+
+    let (status, headers, bytes) = h.call_headers("/skills/demo/1.0.0", Some("tenant-b"), &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    let etag = headers
+        .get("etag")
+        .and_then(|value| value.to_str().ok())
+        .expect("a bundle must carry an ETag")
+        .to_string();
+    assert!(etag.starts_with('"') && etag.ends_with('"'), "{etag}");
+    assert_eq!(
+        headers
+            .get("cache-control")
+            .and_then(|value| value.to_str().ok()),
+        Some("public, max-age=31536000, immutable"),
+        "a public immutable payload may be cached by anything"
+    );
+    assert!(!bytes.is_empty());
+
+    // The client that already has it asks again and pays for headers only.
+    let (status, headers, bytes) = h
+        .call_headers("/skills/demo/1.0.0", Some("tenant-b"), &[("if-none-match", &etag)])
+        .await;
+    assert_eq!(status, StatusCode::NOT_MODIFIED);
+    assert!(bytes.is_empty(), "a 304 must not carry a body");
+    assert_eq!(
+        headers.get("etag").and_then(|value| value.to_str().ok()),
+        Some(etag.as_str())
+    );
+
+    // The revalidation did not count as an install: the counter is what a
+    // publisher reads, and a client checking its cache installed nothing.
+    h.flush();
+    assert_eq!(h.stored_downloads("skills", "demo"), 1);
+
+    // A stale validator still gets the payload, and does count.
+    let (status, _, bytes) = h
+        .call_headers(
+            "/skills/demo/1.0.0",
+            Some("tenant-b"),
+            &[("if-none-match", "\"not-the-digest\"")],
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(!bytes.is_empty());
+    h.flush();
+    assert_eq!(h.stored_downloads("skills", "demo"), 2);
+
+    // A tenant-private bundle must never reach a shared cache.
+    let (status, body) = h.publish_skill("tenant-a", "other", "1.0.0", "tenant").await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let (status, headers, _) = h.call_headers("/skills/other/1.0.0", Some("tenant-a"), &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    let cache_control = headers
+        .get("cache-control")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+    assert!(cache_control.starts_with("private"), "{cache_control}");
+    assert!(!cache_control.contains("public"), "{cache_control}");
+}
+
+/// Bundles are JSON with base64 payloads — the one response where compression is
+/// worth its CPU.
+#[tokio::test]
+async fn big_bundles_are_compressed_for_clients_that_ask() {
+    let h = Harness::new();
+    // Highly compressible text, well past the 1 KiB threshold.
+    let filler = "x".repeat(50_000);
+    let mut files = json!({
+        "SKILL.md": common::GOOD_MANIFEST,
+        "references/notes.md": filler,
+    });
+    let (status, body) = h
+        .publish_skill_with(
+            "tenant-a",
+            json!({
+                "name": "Demo",
+                "slug": "demo",
+                "version": "1.0.0",
+                "visibility": "public",
+                "files": files.take(),
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+
+    let (status, headers, plain) = h.call_headers("/skills/demo/1.0.0", Some("tenant-b"), &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(headers.get("content-encoding").is_none(), "compression was not asked for");
+
+    let (status, headers, gzipped) = h
+        .call_headers(
+            "/skills/demo/1.0.0",
+            Some("tenant-b"),
+            &[("accept-encoding", "gzip, deflate")],
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        headers
+            .get("content-encoding")
+            .and_then(|value| value.to_str().ok()),
+        Some("gzip")
+    );
+    assert!(
+        gzipped.len() < plain.len() / 4,
+        "gzip should shrink 50 KiB of `x` far more than this: {} vs {}",
+        gzipped.len(),
+        plain.len()
+    );
+
+    // The bytes are the same payload once decoded.
+    use std::io::Read;
+    let mut decoded = Vec::new();
+    flate2::read::GzDecoder::new(&gzipped[..])
+        .read_to_end(&mut decoded)
+        .expect("gzip body");
+    assert_eq!(decoded, plain.to_vec());
+
+    // A client that refuses gzip gets the identity encoding.
+    let (status, headers, bytes) = h
+        .call_headers(
+            "/skills/demo/1.0.0",
+            Some("tenant-b"),
+            &[("accept-encoding", "gzip;q=0")],
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(headers.get("content-encoding").is_none());
+    assert_eq!(bytes.len(), plain.len());
+}
+
+/// A market whose database lost its schema must stop answering "ok": otherwise
+/// the container stays healthy while every real request fails.
+#[tokio::test]
+async fn health_reports_a_broken_database() {
+    let h = Harness::new();
+    let (status, _, bytes) = h.call_headers("/health", None, &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    let body: Value = serde_json::from_slice(&bytes).expect("health json");
+    assert_eq!(body["status"], "ok", "{body}");
+    assert_eq!(body["database"], "ok", "{body}");
+
+    h.exec("ALTER TABLE tenants RENAME TO tenants_gone");
+    let (status, _, bytes) = h.call_headers("/health", None, &[]).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "a broken schema must fail");
+    let body: Value = serde_json::from_slice(&bytes).expect("health json");
+    assert_eq!(body["status"], "degraded", "{body}");
+    assert_eq!(body["database"], "error", "{body}");
+
+    h.exec("ALTER TABLE tenants_gone RENAME TO tenants");
+    let (status, _, _) = h.call_headers("/health", None, &[]).await;
+    assert_eq!(status, StatusCode::OK, "health must recover with the database");
+}

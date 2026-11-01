@@ -16,6 +16,7 @@ pub mod counters;
 pub mod db;
 pub mod dto;
 pub mod error;
+pub mod http;
 pub mod limits;
 pub mod log;
 pub mod market;
@@ -163,6 +164,61 @@ pub async fn budget_request(
     }
 }
 
-async fn health() -> axum::Json<serde_json::Value> {
-    axum::Json(serde_json::json!({ "status": "ok" }))
+/// How long the health probe may wait for the database before the container is
+/// declared unhealthy: long enough to ride out a busy write, short enough that an
+/// orchestrator restart is not delayed by a wedged process.
+const HEALTH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Liveness *and* readiness.
+///
+/// Answering "ok" without touching SQLite is how a market whose database went
+/// away stays "healthy": the process is up, `/health` is 200, and every real
+/// request fails. The probe therefore reads the schema through the same
+/// connection and pool every request uses, with a deadline.
+async fn health(State(app): State<Shared>) -> (StatusCode, axum::Json<serde_json::Value>) {
+    let probe = tokio::time::timeout(
+        HEALTH_TIMEOUT,
+        db::offload(&app, |app| {
+            let db = app.db();
+            // A market that lost its schema keeps answering queries — it just
+            // answers wrong. Four tables are the minimum that can serve.
+            let tables: i64 = db
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master
+                      WHERE type = 'table'
+                        AND name IN ('tenants', 'skills', 'agents', 'audit_log')",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(error::ApiError::db)?;
+            if tables < 4 {
+                return Err(error::ApiError::new(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "schema_missing",
+                    format!("数据库缺少 {}/4 张表，可能不是本服务的数据库", tables),
+                ));
+            }
+            Ok(())
+        }),
+    )
+    .await;
+
+    let payload = |status: &str, database: &str, detail: Option<String>| {
+        let mut body = serde_json::json!({ "status": status, "database": database });
+        if let Some(detail) = detail {
+            body["detail"] = serde_json::Value::String(detail);
+        }
+        axum::Json(body)
+    };
+    match probe {
+        Ok(Ok(())) => (StatusCode::OK, payload("ok", "ok", None)),
+        Ok(Err(err)) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            payload("degraded", "error", Some(err.message)),
+        ),
+        Err(_) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            payload("degraded", "timeout", None),
+        ),
+    }
 }

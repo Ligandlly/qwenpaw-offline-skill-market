@@ -5,7 +5,8 @@
 //! `crate::dto`: this module is one of four that returns them, not their owner.
 
 use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
+use axum::response::Response;
 use axum::Json;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -14,6 +15,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::auth::TenantId;
 use crate::db;
+use crate::http;
 use crate::dto::{default_visibility, ListQuery, LookupQuery};
 use crate::error::{ApiError, ApiResult};
 use crate::limits::{self, FileData, MANIFEST};
@@ -382,20 +384,26 @@ pub async fn fetch_bundle(
     State(app): State<Shared>,
     tenant: TenantId,
     Path((slug, version)): Path<(String, String)>,
-) -> ApiResult<Json<Value>> {
+    headers: HeaderMap,
+) -> ApiResult<Response> {
     db::offload(&app, move |app| {
         let db = app.db();
         let payload = market::bundle(app, &db, &market::SKILL, &tenant.0, &slug, &version)?;
+        // A revalidation is not an install: the counter is the only number a
+        // publisher sees, so only a real transfer moves it.
+        if !http::is_revalidated(&headers, &payload.sha256) {
+            app.pending().add_download(market::SKILL.table, &slug);
+        }
         // A skill payload carries no description: the manifest is the contract.
-        Ok(json!({
+        let body = json!({
             "name": payload.name,
             "version": payload.version,
             "files": payload.files,
             "source_url": payload.source_url,
-        }))
+        });
+        http::immutable_json(&body, &payload.sha256, payload.visibility == "public", &headers)
     })
     .await
-    .map(Json)
 }
 
 // ------------------------------------------------------------------ helpers ---

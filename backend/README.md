@@ -171,6 +171,8 @@ docker load -i offline-market-image.tar
 - **错误文案**：用户可见的错误一律中文（`error.message`），程序判断只用 `error.code`（稳定英文，如 `version_exists`）；日志仍为英文。改文案不用改 `code`，`code` 不能改。
 - **版本不可变**：同 `slug+version` 二次发布 → 409 `version_exists`；`latest` 只前进不回退。
 - **下载量**：`skills.download_count` / `agents.download_count` 在 bundle 成功返回后累加；撤回/下架不会清零，`/api/v1/stats` 按「公开 + 本租户私有」汇总。计数先在内存里累加、每 5 秒回写一次（`src/counters.rs`），所以列表与看板最多滞后一个回写周期，进程异常退出会丢掉最后几秒的计数——换来的是下载与列表都不再写库。
+- **bundle 可缓存**：版本不可变，所以 `GET …/bundle` 带 `ETag`（版本自身的 `sha256`）与 `Cache-Control`：`public` 条目是 `public, max-age=31536000, immutable`，`tenant` 私有是 `private, max-age=0, must-revalidate`（进不了共享缓存）。带 `If-None-Match` 命中时直接 304，**且不计数**——304 不是一次安装。响应统一带 `Vary: X-Tenant-Id, Accept-Encoding`，客户端声明 `gzip` 且包超过 1 KiB 时压缩（`src/http.rs`，纯 Rust flate2 后端，不引入 C 依赖）。
+- **健康检查**：`/health` 会真的读一次数据库（2 秒超时，查 4 张核心表是否在），缺表或读失败返回 503 `{"status":"degraded","database":"error"}`，所以「容器健康」等于「服务真的能读库」。
 - **slug 归属**：别人已占用的 slug 发布 → 403，不能劫持。
 - **私有**：非属主列表不可见、下载 403、状态查询 404（fail-closed）。
 - **撤回 vs 下架**：撤回 = 属主行为，市场消失、他人 410、属主仍可取；下架 = 管理员行为，整包 410（含属主），且属主不能自恢复、不能再发布新版本覆盖。
