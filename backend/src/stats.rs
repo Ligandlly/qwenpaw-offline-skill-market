@@ -3,20 +3,27 @@
 //! Counts mirror what the market listing shows this tenant: active public
 //! items plus its own active private ones. Takedown/withdrawn rows are
 //! excluded on purpose — the dashboard is a showcase, not an archive.
-//! `download_count` is incremented by the bundle handlers after a successful
-//! fetch, so it means "successful bundle downloads", not listing views.
+//! `download_count` counts successful bundle fetches, not listing views. The
+//! bundle handlers bump it in memory and `crate::counters` writes it back every
+//! few seconds, so the dashboard can lag by one interval.
 
 use axum::extract::State;
 use axum::Json;
 use rusqlite::{params, Connection};
 use serde_json::{json, Value};
 
-use crate::api::{ApiError, ApiResult};
 use crate::auth::TenantId;
 use crate::db::now;
+use crate::error::{ApiError, ApiResult};
 use crate::state::Shared;
 
 pub async fn overview(State(app): State<Shared>, tenant: TenantId) -> ApiResult<Json<Value>> {
+    crate::db::offload(&app, move |app| dashboard(app, &tenant.0))
+        .await
+        .map(Json)
+}
+
+fn dashboard(app: &Shared, tenant: &str) -> ApiResult<Value> {
     let db = app.db();
     let month_start: i64 = db
         .query_row(
@@ -26,14 +33,14 @@ pub async fn overview(State(app): State<Shared>, tenant: TenantId) -> ApiResult<
         )
         .map_err(ApiError::db)?;
 
-    let skills = counts(&db, "skills", &tenant.0, month_start).map_err(ApiError::db)?;
-    let agents = counts(&db, "agents", &tenant.0, month_start).map_err(ApiError::db)?;
+    let skills = counts(&db, "skills", tenant, month_start).map_err(ApiError::db)?;
+    let agents = counts(&db, "agents", tenant, month_start).map_err(ApiError::db)?;
     let downloads =
         skills["downloads"].as_i64().unwrap_or(0) + agents["downloads"].as_i64().unwrap_or(0);
     let new_this_month = skills["new_this_month"].as_i64().unwrap_or(0)
         + agents["new_this_month"].as_i64().unwrap_or(0);
 
-    Ok(Json(json!({
+    Ok(json!({
         "skills": skills,
         "agents": agents,
         "totals": {
@@ -44,7 +51,7 @@ pub async fn overview(State(app): State<Shared>, tenant: TenantId) -> ApiResult<
         },
         "month_start": month_start,
         "generated_at": now(),
-    })))
+    }))
 }
 
 fn counts(db: &Connection, table: &str, tenant: &str, month_start: i64) -> rusqlite::Result<Value> {

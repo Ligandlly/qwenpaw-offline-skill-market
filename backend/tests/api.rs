@@ -1,126 +1,19 @@
 //! Integration tests for the M1 surface. These encode the PLAN §1 decisions:
 //! fail-closed isolation, immutable versions, withdraw vs. takedown semantics.
 
-use axum::body::Body;
-use axum::http::{Request, StatusCode};
-use axum::Router;
-use http_body_util::BodyExt;
-use offline_market_backend::{
-    build_state,
-    config::{Config, Limits},
-    db, router,
-};
-use serde_json::{json, Value};
-use tower::ServiceExt;
+mod common;
 
-struct Harness {
-    app: Router,
-    state: offline_market_backend::state::Shared,
-}
+use axum::http::StatusCode;
+use common::{find, Harness, GOOD_MANIFEST};
+use rusqlite::trace::{TraceEvent, TraceEventCodes};
+use serde_json::json;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
-const GOOD_MANIFEST: &str = "---\nname: demo\ndescription: a demo skill\n---\n\n# hello\n";
+/// Counts the statements SQLite actually executes on the connection.
+static STATEMENTS: AtomicUsize = AtomicUsize::new(0);
 
-fn test_config() -> Config {
-    Config {
-        bind: "127.0.0.1:0".into(),
-        db_path: "unused".into(),
-        public_url: "http://market.test".into(),
-        admin_user: "admin".into(),
-        admin_password: "s3cret-pw".into(),
-        log_level: "warn".into(),
-        limits: Limits {
-            max_bundle_bytes: 2 * 1024 * 1024,
-            max_files: 100,
-            max_file_bytes: 256 * 1024,
-        },
-    }
-}
-
-impl Harness {
-    fn new() -> Self {
-        let cfg = test_config();
-        let conn = db::open_memory().expect("in-memory db");
-        let state = build_state(cfg, conn);
-        offline_market_backend::admin::ensure_admin(&state);
-        Self {
-            app: router(state.clone()),
-            state,
-        }
-    }
-
-    async fn call(
-        &self,
-        method: &str,
-        uri: &str,
-        tenant: Option<&str>,
-        body: Option<Value>,
-        cookie: Option<&str>,
-    ) -> (StatusCode, Value, Option<String>) {
-        let mut builder = Request::builder().method(method).uri(uri);
-        if let Some(tenant) = tenant {
-            builder = builder.header("x-tenant-id", tenant);
-        }
-        if let Some(cookie) = cookie {
-            builder = builder.header("cookie", cookie);
-        }
-        let request = match body {
-            Some(value) => builder
-                .header("content-type", "application/json")
-                .body(Body::from(value.to_string()))
-                .unwrap(),
-            None => builder.body(Body::empty()).unwrap(),
-        };
-        let response = self.app.clone().oneshot(request).await.unwrap();
-        let status = response.status();
-        let set_cookie = response
-            .headers()
-            .get("set-cookie")
-            .and_then(|v| v.to_str().ok())
-            .map(|v| v.split(';').next().unwrap_or_default().to_string());
-        let bytes = response.into_body().collect().await.unwrap().to_bytes();
-        let value = serde_json::from_slice(&bytes)
-            .unwrap_or_else(|_| json!({ "raw": String::from_utf8_lossy(&bytes) }));
-        (status, value, set_cookie)
-    }
-
-    async fn publish(
-        &self,
-        tenant: &str,
-        slug: &str,
-        version: &str,
-        visibility: &str,
-    ) -> (StatusCode, Value) {
-        let (status, body, _) = self
-            .call(
-                "POST",
-                "/api/v1/skills",
-                Some(tenant),
-                Some(json!({
-                    "name": format!("Skill {slug}"),
-                    "slug": slug,
-                    "version": version,
-                    "visibility": visibility,
-                    "files": { "SKILL.md": GOOD_MANIFEST }
-                })),
-                None,
-            )
-            .await;
-        (status, body)
-    }
-
-    async fn login(&self) -> String {
-        let (status, _body, cookie) = self
-            .call(
-                "POST",
-                "/admin/api/login",
-                None,
-                Some(json!({ "username": "admin", "password": "s3cret-pw" })),
-                None,
-            )
-            .await;
-        assert_eq!(status, StatusCode::OK, "admin login should succeed");
-        cookie.expect("session cookie")
-    }
+fn count_statement(_event: TraceEvent<'_>) {
+    STATEMENTS.fetch_add(1, Ordering::SeqCst);
 }
 
 #[tokio::test]
@@ -158,7 +51,7 @@ async fn publisher_name_labels_a_listing_without_touching_ownership() {
     assert_eq!(named["owner_tenant"], "personal-179b9d");
 
     // a later publish without a name must not wipe the recorded one
-    h.publish("personal-179b9d", "anon", "1.0.0", "public")
+    h.publish_skill("personal-179b9d", "anon", "1.0.0", "public")
         .await;
     let (_s, listing, _) = h
         .call("GET", "/api/v1/skills", Some("tenant-b"), None, None)
@@ -168,7 +61,8 @@ async fn publisher_name_labels_a_listing_without_touching_ownership() {
     assert_eq!(anon["owner_name"], "admin");
 
     // a tenant nobody reported a name for falls back to nothing at all
-    h.publish("personal-ffff", "quiet", "1.0.0", "public").await;
+    h.publish_skill("personal-ffff", "quiet", "1.0.0", "public")
+        .await;
     let (_s, listing, _) = h
         .call("GET", "/api/v1/skills", Some("tenant-b"), None, None)
         .await;
@@ -223,7 +117,7 @@ async fn tenant_header_is_required() {
 #[tokio::test]
 async fn publish_list_and_download_roundtrip() {
     let h = Harness::new();
-    let (status, body) = h.publish("tenant-a", "demo", "1.0.0", "public").await;
+    let (status, body) = h.publish_skill("tenant-a", "demo", "1.0.0", "public").await;
     assert_eq!(status, StatusCode::CREATED, "{body}");
     assert_eq!(body["install_url"], "http://market.test/skills/demo/1.0.0");
     assert_eq!(body["file_count"], 1);
@@ -298,15 +192,15 @@ async fn binary_assets_publish_and_download_unchanged() {
 #[tokio::test]
 async fn versions_are_immutable_and_latest_only_moves_forward() {
     let h = Harness::new();
-    h.publish("tenant-a", "demo", "1.0.0", "public").await;
-    h.publish("tenant-a", "demo", "2.0.0", "public").await;
+    h.publish_skill("tenant-a", "demo", "1.0.0", "public").await;
+    h.publish_skill("tenant-a", "demo", "2.0.0", "public").await;
 
-    let (status, body) = h.publish("tenant-a", "demo", "1.0.0", "public").await;
+    let (status, body) = h.publish_skill("tenant-a", "demo", "1.0.0", "public").await;
     assert_eq!(status, StatusCode::CONFLICT);
     assert_eq!(body["error"]["code"], "version_exists");
 
     // publishing an *older* version must not roll `latest` back
-    let (status, body) = h.publish("tenant-a", "demo", "1.5.0", "public").await;
+    let (status, body) = h.publish_skill("tenant-a", "demo", "1.5.0", "public").await;
     assert_eq!(status, StatusCode::CREATED, "{body}");
     assert_eq!(body["latest_version"], "2.0.0");
 }
@@ -314,7 +208,7 @@ async fn versions_are_immutable_and_latest_only_moves_forward() {
 #[tokio::test]
 async fn listings_carry_the_manifest_description() {
     let h = Harness::new();
-    h.publish("tenant-a", "demo", "1.0.0", "public").await;
+    h.publish_skill("tenant-a", "demo", "1.0.0", "public").await;
 
     let (_s, listing, _) = h
         .call("GET", "/api/v1/skills?q=demo", Some("tenant-b"), None, None)
@@ -358,7 +252,8 @@ async fn listings_carry_the_manifest_description() {
 #[tokio::test]
 async fn private_skills_are_fail_closed() {
     let h = Harness::new();
-    h.publish("tenant-a", "secret", "1.0.0", "tenant").await;
+    h.publish_skill("tenant-a", "secret", "1.0.0", "tenant")
+        .await;
 
     let (status, body, _) = h
         .call("GET", "/skills/secret/1.0.0", Some("tenant-b"), None, None)
@@ -459,7 +354,7 @@ async fn gate_rejects_traversal_and_missing_manifest() {
 #[tokio::test]
 async fn withdraw_hides_from_market_but_not_from_owner() {
     let h = Harness::new();
-    h.publish("tenant-a", "demo", "1.0.0", "public").await;
+    h.publish_skill("tenant-a", "demo", "1.0.0", "public").await;
 
     let (status, _, _) = h
         .call(
@@ -527,7 +422,7 @@ async fn withdraw_hides_from_market_but_not_from_owner() {
 #[tokio::test]
 async fn admin_takedown_stops_redistribution_and_blocks_self_restore() {
     let h = Harness::new();
-    h.publish("tenant-a", "bad", "1.0.0", "public").await;
+    h.publish_skill("tenant-a", "bad", "1.0.0", "public").await;
     let cookie = h.login().await;
 
     // no cookie -> rejected
@@ -582,7 +477,7 @@ async fn admin_takedown_stops_redistribution_and_blocks_self_restore() {
     assert_eq!(status, StatusCode::CONFLICT);
     assert_eq!(body["error"]["code"], "taken_down");
 
-    let (status, body) = h.publish("tenant-a", "bad", "1.0.1", "public").await;
+    let (status, body) = h.publish_skill("tenant-a", "bad", "1.0.1", "public").await;
     assert_eq!(status, StatusCode::CONFLICT);
     assert_eq!(body["error"]["code"], "taken_down");
 
@@ -606,15 +501,18 @@ async fn admin_takedown_stops_redistribution_and_blocks_self_restore() {
 #[tokio::test]
 async fn slug_ownership_cannot_be_hijacked() {
     let h = Harness::new();
-    h.publish("tenant-a", "taken", "1.0.0", "public").await;
-    let (status, body) = h.publish("tenant-b", "taken", "2.0.0", "public").await;
+    h.publish_skill("tenant-a", "taken", "1.0.0", "public")
+        .await;
+    let (status, body) = h
+        .publish_skill("tenant-b", "taken", "2.0.0", "public")
+        .await;
     assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
 }
 
 #[tokio::test]
 async fn admin_login_and_audit_trail() {
     let h = Harness::new();
-    h.publish("tenant-a", "demo", "1.0.0", "public").await;
+    h.publish_skill("tenant-a", "demo", "1.0.0", "public").await;
 
     let (status, body, _) = h
         .call(
@@ -677,8 +575,9 @@ async fn limits_are_exposed_for_the_plugin_to_mirror() {
 #[tokio::test]
 async fn lookup_maps_display_name_to_slug_even_after_takedown() {
     let h = Harness::new();
-    h.publish("tenant-a", "demo", "1.0.0", "public").await;
-    h.publish("tenant-a", "secret", "1.0.0", "tenant").await;
+    h.publish_skill("tenant-a", "demo", "1.0.0", "public").await;
+    h.publish_skill("tenant-a", "secret", "1.0.0", "tenant")
+        .await;
     let cookie = h.login().await;
     h.call(
         "POST",
@@ -721,12 +620,65 @@ async fn lookup_maps_display_name_to_slug_even_after_takedown() {
     assert_eq!(body["items"].as_array().unwrap().len(), 0);
 }
 
+/// Download counts and the `last_seen` beacon accumulate in memory and reach
+/// SQLite in one batch: a fetch or a page of the market must not take the write
+/// lock, or a busy market serialises every install behind every listing.
+#[tokio::test]
+async fn counts_are_written_back_in_a_batch_not_per_fetch() {
+    let h = Harness::new();
+    h.publish_skill("tenant-a", "demo", "1.0.0", "public").await;
+
+    for _ in 0..3 {
+        let (status, _, _) = h
+            .call("GET", "/skills/demo/latest", Some("tenant-b"), None, None)
+            .await;
+        assert_eq!(status, StatusCode::OK);
+    }
+    let (status, _, _) = h
+        .call("GET", "/api/v1/skills", Some("tenant-b"), None, None)
+        .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // tenant-b only read; nothing it did has reached the database yet — not the
+    // counter, and not even a `tenants` row.
+    assert_eq!(h.stored_downloads("skills", "demo"), 0);
+    let known_tenants: i64 = h
+        .state
+        .db()
+        .query_row(
+            "SELECT COUNT(*) FROM tenants WHERE id = 'tenant-b'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        known_tenants, 0,
+        "a listing GET must not insert a tenant row"
+    );
+
+    h.flush();
+
+    assert_eq!(h.stored_downloads("skills", "demo"), 3);
+    let last_seen: i64 = h
+        .state
+        .db()
+        .query_row(
+            "SELECT last_seen FROM tenants WHERE id = 'tenant-b'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(last_seen > 0, "the beacon must reach the database on flush");
+}
+
 #[tokio::test]
 async fn dashboard_counts_visible_active_items_and_keeps_download_history() {
     let h = Harness::new();
-    h.publish("tenant-a", "demo", "1.0.0", "public").await;
-    h.publish("tenant-a", "internal", "1.0.0", "tenant").await;
-    h.publish("tenant-b", "other", "1.0.0", "public").await;
+    h.publish_skill("tenant-a", "demo", "1.0.0", "public").await;
+    h.publish_skill("tenant-a", "internal", "1.0.0", "tenant")
+        .await;
+    h.publish_skill("tenant-b", "other", "1.0.0", "public")
+        .await;
 
     // Two successful skill downloads.
     for _ in 0..2 {
@@ -735,6 +687,9 @@ async fn dashboard_counts_visible_active_items_and_keeps_download_history() {
             .await;
         assert_eq!(status, StatusCode::OK);
     }
+
+    // Counts live in memory until the write-back task runs.
+    h.flush();
 
     let (status, stats, _) = h
         .call("GET", "/api/v1/stats", Some("tenant-b"), None, None)
@@ -772,7 +727,7 @@ async fn dashboard_counts_visible_active_items_and_keeps_download_history() {
 async fn listing_reports_totals_and_whitelisted_sort_orders() {
     let h = Harness::new();
     for slug in ["alpha", "beta", "gamma"] {
-        let (status, body) = h.publish("tenant-a", slug, "1.0.0", "public").await;
+        let (status, body) = h.publish_skill("tenant-a", slug, "1.0.0", "public").await;
         assert_eq!(status, StatusCode::CREATED, "{body}");
     }
 
@@ -787,6 +742,9 @@ async fn listing_reports_totals_and_whitelisted_sort_orders() {
         .call("GET", "/skills/gamma/1.0.0", Some("tenant-b"), None, None)
         .await;
     assert_eq!(status, StatusCode::OK);
+
+    // Counts live in memory until the write-back task runs.
+    h.flush();
 
     let (status, listing, _) = h
         .call(
@@ -908,7 +866,8 @@ async fn chinese_names_derive_a_pinyin_slug_for_publish_and_preview() {
 #[tokio::test]
 async fn validate_reports_every_problem_without_publishing() {
     let h = Harness::new();
-    h.publish("tenant-a", "taken-id", "1.0.0", "public").await;
+    h.publish_skill("tenant-a", "taken-id", "1.0.0", "public")
+        .await;
 
     let (status, body, _) = h
         .call(
@@ -1025,4 +984,77 @@ async fn validate_reports_every_problem_without_publishing() {
     assert_eq!(body["problems"][0]["code"], "slug_taken");
     assert_eq!(body["existing"]["mine"], false);
     assert!(body["next_version"].is_null());
+}
+
+/// The `latest` pointer is advanced with `compare_versions(...).is_gt()`, so a
+/// prerelease must sort below its own release in both directions: publishing
+/// `1.0.0` after `1.0.0-beta` has to move the pointer, and a later
+/// `1.0.0-rc.2` must not drag it back.
+#[tokio::test]
+async fn latest_moves_from_a_prerelease_to_its_release() {
+    let h = Harness::new();
+    h.publish_skill("tenant-a", "pre", "1.0.0-beta", "public")
+        .await;
+    let (_, listing, _) = h
+        .call("GET", "/api/v1/skills", Some("tenant-b"), None, None)
+        .await;
+    assert_eq!(find(&listing, "pre")["latest_version"], "1.0.0-beta");
+
+    let (status, body) = h.publish_skill("tenant-a", "pre", "1.0.0", "public").await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(body["latest_version"], "1.0.0", "{body}");
+    let (_, listing, _) = h
+        .call("GET", "/api/v1/skills", Some("tenant-b"), None, None)
+        .await;
+    assert_eq!(find(&listing, "pre")["latest_version"], "1.0.0");
+
+    // A prerelease of the version already at the top is *older*: no advance.
+    let (status, body) = h
+        .publish_skill("tenant-a", "pre", "1.0.0-rc.2", "public")
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(body["latest_version"], "1.0.0", "{body}");
+    let (status, bundle) = h
+        .download("/api/v1/skills/pre/latest/bundle", Some("tenant-b"))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let bundle: serde_json::Value = serde_json::from_slice(&bundle).unwrap();
+    assert_eq!(bundle["version"], "1.0.0");
+}
+
+/// The write-back runs every 5 seconds whether or not anything happened, so the
+/// empty batch has to stop *before* it takes the connection: an idle market must
+/// cost SQLite nothing at all — no transaction, no statement, no WAL frame.
+#[tokio::test]
+async fn an_idle_write_back_never_touches_the_database() {
+    let h = Harness::new();
+    h.publish_skill("tenant-a", "demo", "1.0.0", "public").await;
+    let (status, _) = h.download("/skills/demo/latest", Some("tenant-a")).await;
+    assert_eq!(status, StatusCode::OK);
+
+    h.db()
+        .trace_v2(TraceEventCodes::SQLITE_TRACE_STMT, Some(count_statement));
+
+    // First prove the probe works: a batch with something in it must produce
+    // statements, otherwise the zero below would be meaningless.
+    STATEMENTS.store(0, Ordering::SeqCst);
+    h.flush();
+    assert!(
+        STATEMENTS.load(Ordering::SeqCst) > 0,
+        "the probe must observe a real write-back"
+    );
+
+    // Now the interesting case: nothing accumulated, two intervals in a row.
+    STATEMENTS.store(0, Ordering::SeqCst);
+    h.flush();
+    h.flush();
+    assert_eq!(
+        STATEMENTS.load(Ordering::SeqCst),
+        0,
+        "an empty batch must not reach SQLite at all"
+    );
+
+    // And the counters that were flushed are still there, so the silence above
+    // was not a skipped batch.
+    assert_eq!(h.stored_downloads("skills", "demo"), 1);
 }

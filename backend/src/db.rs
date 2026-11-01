@@ -1,7 +1,18 @@
 //! SQLite schema + thin helpers. No ORM: the schema is small and read-mostly.
 
+use axum::http::StatusCode;
 use rusqlite::Connection;
 use std::path::Path;
+use std::time::Duration;
+
+use crate::error::{ApiError, ApiResult};
+use crate::state::Shared;
+
+/// How long a writer waits for the lock before giving up. The process holds a
+/// single connection, but an operator's `sqlite3` session or a second replica on
+/// the same file can hold the write lock; without this every such overlap is an
+/// instant `SQLITE_BUSY` error.
+const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub const SCHEMA: &str = r#"
 PRAGMA journal_mode = WAL;
@@ -36,9 +47,25 @@ CREATE TABLE IF NOT EXISTS skills (
     takedown_reason  TEXT,
     -- Successful bundle fetches (installs). A counter, not an audit row:
     -- a dashboard needs cheap SUM(), and old rows start at zero.
-    download_count   INTEGER NOT NULL DEFAULT 0
+    download_count   INTEGER NOT NULL DEFAULT 0,
+    -- The latest `SKILL.md`, kept here so a listing row costs one column read
+    -- instead of a `json_extract` over the newest (up to 2 MiB) bundle. Only
+    -- `market::store` writes it, and only when a version takes over as latest.
+    manifest_text    TEXT,
+    -- Materialized summary of the version history: a listing serves these for
+    -- every row, and recomputing them with correlated subqueries meant one
+    -- full scan of the version table per returned row. Maintained by
+    -- `market::store` inside the publish transaction.
+    version_count    INTEGER NOT NULL DEFAULT 0,
+    size_bytes       INTEGER NOT NULL DEFAULT 0,
+    updated_at       INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_skills_owner ON skills(owner_tenant);
+-- The listing filters on exactly this triple; keeping the index partial keeps
+-- withdrawn and taken-down rows (which no market page returns) out of it.
+CREATE INDEX IF NOT EXISTS idx_skills_live
+    ON skills(visibility, owner_tenant)
+ WHERE withdrawn_at IS NULL AND takedown_at IS NULL;
 
 CREATE TABLE IF NOT EXISTS skill_versions (
     slug        TEXT NOT NULL REFERENCES skills(slug) ON DELETE CASCADE,
@@ -64,9 +91,18 @@ CREATE TABLE IF NOT EXISTS agents (
     takedown_at      INTEGER,
     takedown_by      TEXT,
     takedown_reason  TEXT,
-    download_count   INTEGER NOT NULL DEFAULT 0
+    download_count   INTEGER NOT NULL DEFAULT 0,
+    -- Declared skills of the latest version, for the same reason as
+    -- `version_count` below: the listing serves it for every row.
+    skill_count      INTEGER NOT NULL DEFAULT 0,
+    version_count    INTEGER NOT NULL DEFAULT 0,
+    size_bytes       INTEGER NOT NULL DEFAULT 0,
+    updated_at       INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_agents_owner ON agents(owner_tenant);
+CREATE INDEX IF NOT EXISTS idx_agents_live
+    ON agents(visibility, owner_tenant)
+ WHERE withdrawn_at IS NULL AND takedown_at IS NULL;
 
 CREATE TABLE IF NOT EXISTS agent_versions (
     slug        TEXT NOT NULL REFERENCES agents(slug) ON DELETE CASCADE,
@@ -90,7 +126,9 @@ CREATE TABLE IF NOT EXISTS audit_log (
     version TEXT,
     detail  TEXT
 );
-CREATE INDEX IF NOT EXISTS idx_audit_at ON audit_log(at);
+-- No index on `at`: the log is served `ORDER BY id DESC`, which is the rowid
+-- order, and nothing filters by timestamp. The old `idx_audit_at` only cost
+-- writes.
 "#;
 
 pub fn open(path: &Path) -> rusqlite::Result<Connection> {
@@ -99,36 +137,101 @@ pub fn open(path: &Path) -> rusqlite::Result<Connection> {
             let _ = std::fs::create_dir_all(dir);
         }
     }
-    let conn = Connection::open(path)?;
+    let mut conn = Connection::open(path)?;
+    conn.busy_timeout(BUSY_TIMEOUT)?;
     conn.execute_batch(SCHEMA)?;
-    migrate(&conn)?;
+    migrate(&mut conn)?;
     Ok(conn)
 }
 
 pub fn open_memory() -> rusqlite::Result<Connection> {
-    let conn = Connection::open_in_memory()?;
+    let mut conn = Connection::open_in_memory()?;
+    conn.busy_timeout(BUSY_TIMEOUT)?;
     conn.execute_batch(SCHEMA)?;
-    migrate(&conn)?;
+    migrate(&mut conn)?;
     Ok(conn)
 }
 
-/// `CREATE TABLE IF NOT EXISTS` cannot add columns to a market that is
-/// already running, so older databases get the new ones here. Idempotent.
-fn migrate(conn: &Connection) -> rusqlite::Result<()> {
-    ensure_column(conn, "tenants", "display_name", "TEXT")?;
-    ensure_column(conn, "audit_log", "kind", "TEXT NOT NULL DEFAULT 'skill'")?;
+/// How far the on-disk schema has come. Bumped whenever `SCHEMA` grows a column
+/// or a step needs a backfill; `PRAGMA user_version` records it per database.
+pub const SCHEMA_VERSION: i64 = 2;
+
+/// `CREATE TABLE IF NOT EXISTS` cannot add columns to a market that is already
+/// running, so older databases are brought forward here.
+///
+/// Steps run once per database (tracked in `user_version`), which is why a
+/// healthy restart no longer re-checks every column or re-runs the backfill.
+/// A database newer than this build is refused rather than half-understood.
+pub fn migrate(conn: &mut Connection) -> rusqlite::Result<()> {
+    let current: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    if current > SCHEMA_VERSION {
+        return Err(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(1),
+            Some(format!(
+                "数据库 schema 是 {current}，本程序只支持到 {SCHEMA_VERSION}；\
+                 请升级程序，或用备份的旧库启动"
+            )),
+        ));
+    }
+    if current == SCHEMA_VERSION {
+        return Ok(());
+    }
+    let tx = conn.transaction()?;
+    // 1: columns added after the first release.
+    ensure_column(&tx, "tenants", "display_name", "TEXT")?;
+    ensure_column(&tx, "audit_log", "kind", "TEXT NOT NULL DEFAULT 'skill'")?;
     ensure_column(
-        conn,
+        &tx,
         "skills",
         "download_count",
         "INTEGER NOT NULL DEFAULT 0",
     )?;
     ensure_column(
-        conn,
+        &tx,
         "agents",
         "download_count",
         "INTEGER NOT NULL DEFAULT 0",
     )?;
+    // 2: the listing serves these columns instead of aggregating per row.
+    for (table, column, definition) in [
+        ("skills", "manifest_text", "TEXT"),
+        ("skills", "version_count", "INTEGER NOT NULL DEFAULT 0"),
+        ("skills", "size_bytes", "INTEGER NOT NULL DEFAULT 0"),
+        ("skills", "updated_at", "INTEGER NOT NULL DEFAULT 0"),
+        ("agents", "skill_count", "INTEGER NOT NULL DEFAULT 0"),
+        ("agents", "version_count", "INTEGER NOT NULL DEFAULT 0"),
+        ("agents", "size_bytes", "INTEGER NOT NULL DEFAULT 0"),
+        ("agents", "updated_at", "INTEGER NOT NULL DEFAULT 0"),
+    ] {
+        ensure_column(&tx, table, column, definition)?;
+    }
+    // A market that predates the summary columns still has rows: fill them in
+    // once, from the same source `market::store` uses.
+    tx.execute_batch(
+        r#"
+UPDATE skills SET
+    version_count = (SELECT COUNT(*) FROM skill_versions v WHERE v.slug = skills.slug),
+    size_bytes    = (SELECT COALESCE(SUM(size_bytes), 0) FROM skill_versions v WHERE v.slug = skills.slug),
+    updated_at    = COALESCE((SELECT MAX(created_at) FROM skill_versions v WHERE v.slug = skills.slug),
+                             skills.created_at),
+    manifest_text = (SELECT json_extract(v.bundle_json, '$."SKILL.md"')
+                       FROM skill_versions v
+                      WHERE v.slug = skills.slug AND v.version = skills.latest_version)
+ WHERE updated_at = 0;
+
+UPDATE agents SET
+    version_count = (SELECT COUNT(*) FROM agent_versions v WHERE v.slug = agents.slug),
+    size_bytes    = (SELECT COALESCE(SUM(size_bytes), 0) FROM agent_versions v WHERE v.slug = agents.slug),
+    updated_at    = COALESCE((SELECT MAX(created_at) FROM agent_versions v WHERE v.slug = agents.slug),
+                             agents.created_at),
+    skill_count   = COALESCE((SELECT skill_count FROM agent_versions v
+                               WHERE v.slug = agents.slug AND v.version = agents.latest_version), 0)
+ WHERE updated_at = 0;
+"#,
+    )?;
+    tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+    tx.commit()?;
+    tracing::info!(from = current, to = SCHEMA_VERSION, "schema: migrated");
     Ok(())
 }
 
@@ -152,6 +255,36 @@ fn ensure_column(
     Ok(())
 }
 
+/// Runs blocking SQLite work on the blocking pool instead of a runtime worker.
+///
+/// rusqlite is synchronous and the one connection sits behind a mutex, so a
+/// handler that queries inline parks a tokio worker thread — first while it
+/// waits for the lock, then while the query runs. Under any concurrency that
+/// starves the async side of the runtime, which is exactly the failure mode
+/// "the market got slow and stopped answering /health" describes. Every
+/// handler that touches the database goes through here instead.
+///
+/// The closure gets the `Shared` rather than a `&Connection` so it can still
+/// read `app.cfg` (bundle URLs, limits) without cloning them per request.
+pub async fn offload<T, F>(app: &Shared, work: F) -> ApiResult<T>
+where
+    F: FnOnce(&Shared) -> ApiResult<T> + Send + 'static,
+    T: Send + 'static,
+{
+    let app = app.clone();
+    match tokio::task::spawn_blocking(move || work(&app)).await {
+        Ok(result) => result,
+        Err(err) => {
+            tracing::error!(error = %err, "blocking market task failed");
+            Err(ApiError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal",
+                "内部任务失败，请稍后重试",
+            ))
+        }
+    }
+}
+
 pub fn now() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -159,18 +292,14 @@ pub fn now() -> i64 {
         .unwrap_or(0)
 }
 
-pub fn audit(
-    conn: &Connection,
-    actor: &str,
-    action: &str,
-    slug: Option<&str>,
-    version: Option<&str>,
-    detail: Option<&str>,
-) -> rusqlite::Result<()> {
-    audit_kind(conn, "skill", actor, action, slug, version, detail)
-}
+/// Audit tags: which plane an entry belongs to.
+pub const AUDIT_SKILL: &str = "skill";
+pub const AUDIT_AGENT: &str = "agent";
+/// Sign-in and other events that belong to no skill or agent.
+pub const AUDIT_ADMIN: &str = "admin";
 
-/// Same audit trail, tagged so the admin UI can tell skills from agents.
+/// One audit trail, tagged by what the entry is about (`skill`, `agent`, or
+/// `admin` for sign-in events) so the admin UI can filter by plane.
 pub fn audit_kind(
     conn: &Connection,
     kind: &str,

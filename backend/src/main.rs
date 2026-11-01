@@ -1,9 +1,18 @@
-use offline_market_backend::{admin, build_state, config::Config, db, log, router};
+use offline_market_backend::{admin, build_state, config::Config, counters, db, log, router};
 use tracing::info;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let cfg = Config::from_env();
+    let cfg = match Config::from_env() {
+        Ok(cfg) => cfg,
+        Err(err) => {
+            // Nothing has been logged yet: this has to reach the operator
+            // verbatim, and a config error is never worth retrying in-place.
+            eprintln!("配置错误：{err}");
+            eprintln!("（各项含义见 backend/README.md 的环境变量表）");
+            std::process::exit(2);
+        }
+    };
     log::init(&cfg.log_level);
 
     let conn = db::open(&cfg.db_path)?;
@@ -22,6 +31,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         admin::ensure_admin(&app);
     }
 
+    // Download counts and `last_seen` beacons accumulate in memory and land
+    // here; without this task they would never reach the database.
+    let (stopping, stop) = tokio::sync::watch::channel(false);
+    tokio::spawn(counters::flush_loop(app.clone(), stop));
+
     let listener = tokio::net::TcpListener::bind(&cfg.bind).await?;
     info!(
         bind = %cfg.bind,
@@ -36,13 +50,44 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         max_file_bytes = cfg.limits.max_file_bytes,
         "publish limits"
     );
-    axum::serve(listener, router(app))
+    axum::serve(listener, router(app.clone()))
         .with_graceful_shutdown(shutdown())
         .await?;
+
+    // The last batch must not wait for the next tick.
+    let _ = stopping.send(true);
+    if let Err(err) = counters::flush(&app) {
+        info!(code = err.code, "final counter flush failed");
+    }
     Ok(())
 }
 
+/// Waits for the first stop request.
+///
+/// `docker stop`, `systemctl stop` and Kubernetes all send SIGTERM, not SIGINT;
+/// listening only for Ctrl-C meant those stops killed the process outright and
+/// the pending counter batch was lost.
 async fn shutdown() {
-    let _ = tokio::signal::ctrl_c().await;
-    info!("shutting down");
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        match signal(SignalKind::terminate()) {
+            Ok(mut terminate) => {
+                tokio::select! {
+                    _ = terminate.recv() => info!(signal = "SIGTERM", "shutting down"),
+                    _ = tokio::signal::ctrl_c() => info!(signal = "SIGINT", "shutting down"),
+                }
+            }
+            Err(err) => {
+                tracing::warn!(error = %err, "SIGTERM handler unavailable, waiting for Ctrl-C only");
+                let _ = tokio::signal::ctrl_c().await;
+                info!(signal = "SIGINT", "shutting down");
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+        info!(signal = "SIGINT", "shutting down");
+    }
 }

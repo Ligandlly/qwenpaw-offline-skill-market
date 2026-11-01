@@ -24,7 +24,7 @@
 cp deploy/.env.example deploy/.env     # 必改：ADMIN_PASSWORD、MARKET_PUBLIC_URL
 vi deploy/.env
 docker compose -f deploy/docker-compose.yml up -d      # 不需要 --env-file
-curl -s http://localhost:8080/health
+curl -s http://localhost:8080/health    # {"status":"ok","database":"ok"}；数据库不可用时 503 + status=degraded
 ```
 
 **用 ghcr 上的预构建镜像**（省掉本地编译，内网机器尤其省事）：
@@ -421,7 +421,8 @@ python3 deploy/scripts/e2e.py --skip-a --skip-b \
 | 容器内诊断 | `docker exec <容器> ...` 调插件 `/api/offline-market/config` 与 `/host-health`（§2.6） |
 | 备份 | 停机或 `sqlite3 market.sqlite3 ".backup /backup/market-$(date +%F).sqlite3"`；包体也存在库里，一个文件就是全部 |
 | 恢复 | 停后端 → 覆盖 sqlite 文件 → 启动；`-wal`/`-shm` 一并清掉 |
-| 升级后端 | 换二进制/镜像，重启；schema 目前是 `CREATE TABLE IF NOT EXISTS`，无迁移步骤 |
+| 停后端 | `docker stop` / `systemctl stop`（发 `SIGTERM`）会优雅退出：停止接新请求、等在途请求完成、回写内存计数后退出码 0；`kill -9` 会丢掉最后几秒（最多 5 秒）的下载计数 |
+| 升级后端 | 换二进制/镜像，重启；库结构按 `PRAGMA user_version` 自动升级（每个版本只跑一次，旧的技能/智能体数据会一次性回填列表字段），库比程序新时拒绝启动而不是半读 |
 | 升级插件 | `unzip <新 zip>` → `qwenpaw plugin install ./offline-market --force`（App 运行时可直接 `plugin install <新 zip> --force`）后重启 runtime |
 
 ---
@@ -483,7 +484,7 @@ curl -s -H "x-tenant-id: <租户id>" http://<市场地址>:8080/api/v1/skills?li
 | `X-Tenant-Id` 是信任不是认证 | 后端必须只在内网暴露；能访问内网的人可以伪造租户 |
 | 审计只到租户 | 一租户一人的前提下等于到人；多用户租户需要再加身份 |
 | 限额改动需重启 | 环境变量是唯一来源 |
-| 智能体 MVP 无独立额度 | 只受 64 MiB HTTP 请求体限制；后续再加 `MARKET_MAX_AGENT_*` |
+| 智能体 MVP 无独立额度 | 只受发布路由的请求体上限与 `MARKET_MAX_*` 网关限制；后续再加 `MARKET_MAX_AGENT_*` |
 | 智能体卸载保留工作区 | 宿主只摘配置；容器内 `/workspace/workspaces/<id>` 需按 §2.6 手工清理 |
 | Docker Hub 网络禁容器互访 | 市场后端不能用同网络容器名，必须走宿主机网桥网关/`host.docker.internal`（§2.6） |
 | 智能体宿主 API 仅容器内 loopback | 不要手工把 `QWENPAW_RUNTIME_API_URL` 指向宿主机映射端口 |

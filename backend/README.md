@@ -55,6 +55,12 @@ $env:MARKET_PUBLIC_URL="http://10.137.157.214:8080"; cargo run
 | `MARKET_MAX_BUNDLE_BYTES` | `2097152`（2 MiB） | 单包总字节 |
 | `MARKET_MAX_FILES` | `100` | 文件数 |
 | `MARKET_MAX_FILE_BYTES` | `262144`（256 KiB） | 单文件字节 |
+| `MARKET_REQUEST_TIMEOUT_MS` | `30000` | 单个请求的处理上限（毫秒），超时返回 503 `timeout`。默认值放宽是为上传大包留余量；与实际网络无关的抖动可调小 |
+
+配置会在启动时校验一遍，不合法的值直接**拒绝启动**（退出码 2，`stderr` 打印哪一项错了）：
+`MARKET_BIND` 必须 `host:port` 且端口非 0；`MARKET_PUBLIC_URL` 必须以 `http://` 或 `https://` 开头并有主机名
+（它决定每个 `install_url`，相对地址等于发出去装不上）；三个 `MARKET_MAX_*` 必须 > 0（0 会让所有发布被拒）；
+`ADMIN_PASSWORD` 空（生成随机密码）或至少 8 个字符；`MARKET_LOG` 必须是上面六个级别之一（拼错不再被静默忽略）。
 
 ## 两个身份面
 
@@ -143,6 +149,23 @@ WARN request rejected tenant=- method=GET path=/api/v1/skills status=401 ms=0.1
 - `debug` 级别另记业务细节：发布/撤回/下架、bundle 下载大小、闸门拒绝原因、审计写入等。
 - 审计（`GET /admin/api/audit`）是**业务记录**，日志是**运维记录**，两者不互相替代。
 
+## 优雅退出
+
+`SIGTERM` 与 `SIGINT`（`docker stop` / `systemctl stop` / `kubectl delete` 发的都是前者）
+走同一条优雅路径：停止接受新连接 → 等在途请求结束 → 把内存里的下载计数回写 →
+以退出码 0 结束。停止后 `journalctl` / `docker logs` 最后一行是
+`INFO shutting down signal=SIGTERM`。
+
+```bash
+kill -TERM $(pgrep offline-market)     # 等同 docker stop / systemctl stop
+```
+
+收到信号后仍在处理的请求会正常完成（axum 的 `with_graceful_shutdown`），不会出现
+"连接被重置 + 计数丢失"。容器默认的 10 秒 `stop_grace_period` 足够；
+若把 `MARKET_REQUEST_TIMEOUT_MS` 调得比它长，记得同步加大 `stop_grace_period`。
+这段行为由 `backend/tests/shutdown.rs` 起真实进程验证（发 TERM/INT，断言退出码 0，
+并断言退出后数据库能立刻被下一个进程重新打开）。
+
 ## 镜像
 
 ```bash
@@ -169,7 +192,9 @@ docker load -i offline-market-image.tar
 
 - **错误文案**：用户可见的错误一律中文（`error.message`），程序判断只用 `error.code`（稳定英文，如 `version_exists`）；日志仍为英文。改文案不用改 `code`，`code` 不能改。
 - **版本不可变**：同 `slug+version` 二次发布 → 409 `version_exists`；`latest` 只前进不回退。
-- **下载量**：`skills.download_count` / `agents.download_count` 在 bundle 成功返回后自增；撤回/下架不会清零，`/api/v1/stats` 按「公开 + 本租户私有」汇总。升级前的历史下载无法回溯，从本版本开始计数。
+- **下载量**：`skills.download_count` / `agents.download_count` 在 bundle 成功返回后累加；撤回/下架不会清零，`/api/v1/stats` 按「公开 + 本租户私有」汇总。计数先在内存里累加、每 5 秒回写一次（`src/counters.rs`），所以列表与看板最多滞后一个回写周期，进程异常退出会丢掉最后几秒的计数——换来的是下载与列表都不再写库。
+- **bundle 可缓存**：版本不可变，所以 `GET …/bundle` 带 `ETag`（版本自身的 `sha256`）与 `Cache-Control`：`public` 条目是 `public, max-age=31536000, immutable`，`tenant` 私有是 `private, max-age=0, must-revalidate`（进不了共享缓存）。带 `If-None-Match` 命中时直接 304，**且不计数**——304 不是一次安装。响应统一带 `Vary: X-Tenant-Id, Accept-Encoding`，客户端声明 `gzip` 且包超过 1 KiB 时压缩（`src/http.rs`，纯 Rust flate2 后端，不引入 C 依赖）。
+- **健康检查**：`/health` 会真的读一次数据库（2 秒超时，查 4 张核心表是否在），缺表或读失败返回 503 `{"status":"degraded","database":"error"}`，所以「容器健康」等于「服务真的能读库」。
 - **slug 归属**：别人已占用的 slug 发布 → 403，不能劫持。
 - **私有**：非属主列表不可见、下载 403、状态查询 404（fail-closed）。
 - **撤回 vs 下架**：撤回 = 属主行为，市场消失、他人 410、属主仍可取；下架 = 管理员行为，整包 410（含属主），且属主不能自恢复、不能再发布新版本覆盖。
@@ -181,12 +206,15 @@ docker load -i offline-market-image.tar
 
 同一进程同时提供 agent 市场。包格式、宿主安装链路与后续安全项见
 [`docs/AGENT_MARKET.md`](../docs/AGENT_MARKET.md)；当前按决定**不启用独立额度**，
-只有 64 MiB 的 HTTP 请求体上限。
+请求体上限按路由设置：发布与干跑路由是 `MARKET_MAX_BUNDLE_BYTES × 6 + 64 KiB`
+（JSON 转义与 base64 的最坏展开），登录/登出 8 KiB，其余路由回落 axum 默认的 2 MiB。
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | GET | `/api/v1/agents?q=&page=&limit=` | 公开 + 自己的私有，已撤回/下架不出现 |
 | GET | `/api/v1/agents/mine` | 自己的全部（含已撤回） |
+| GET | `/api/v1/agents/lookup?names=a,b` | 展示名 → slug + 状态（与 `/api/v1/skills/lookup` 同构） |
+| POST | `/api/v1/agents/validate` | 发布前干跑（只读），信封与 `/api/v1/skills/validate` 一致 |
 | GET | `/api/v1/agents/{slug}/status` | `active` / `withdrawn` / `taken_down` |
 | POST | `/api/v1/agents` | 发布不可变版本 |
 | POST | `/api/v1/agents/{slug}/withdraw` | 属主撤回 |
@@ -195,7 +223,7 @@ docker load -i offline-market-image.tar
 | GET | `/admin/api/agents?q=&limit=` | 管理端全量列表 |
 | POST | `/admin/api/agents/{slug}/takedown` | `{reason}` 整包下架 |
 | POST | `/admin/api/agents/{slug}/restore` | 撤销下架 |
-| GET | `/admin/api/audit?kind=agent&limit=` | 审计按 `kind` 过滤（`skill`/`agent`） |
+| GET | `/admin/api/audit?kind=agent&limit=` | 审计按 `kind` 过滤（`skill`/`agent`/`admin`） |
 
 发布请求（`name` / `description` 来自包内 `manifest.json`）：
 
