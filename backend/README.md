@@ -144,6 +144,23 @@ WARN request rejected tenant=- method=GET path=/api/v1/skills status=401 ms=0.1
 - `debug` 级别另记业务细节：发布/撤回/下架、bundle 下载大小、闸门拒绝原因、审计写入等。
 - 审计（`GET /admin/api/audit`）是**业务记录**，日志是**运维记录**，两者不互相替代。
 
+## 优雅退出
+
+`SIGTERM` 与 `SIGINT`（`docker stop` / `systemctl stop` / `kubectl delete` 发的都是前者）
+走同一条优雅路径：停止接受新连接 → 等在途请求结束 → 把内存里的下载计数回写 →
+以退出码 0 结束。停止后 `journalctl` / `docker logs` 最后一行是
+`INFO shutting down signal=SIGTERM`。
+
+```bash
+kill -TERM $(pgrep offline-market)     # 等同 docker stop / systemctl stop
+```
+
+收到信号后仍在处理的请求会正常完成（axum 的 `with_graceful_shutdown`），不会出现
+"连接被重置 + 计数丢失"。容器默认的 10 秒 `stop_grace_period` 足够；
+若把 `MARKET_REQUEST_TIMEOUT_MS` 调得比它长，记得同步加大 `stop_grace_period`。
+这段行为由 `backend/tests/shutdown.rs` 起真实进程验证（发 TERM/INT，断言退出码 0，
+并断言退出后数据库能立刻被下一个进程重新打开）。
+
 ## 镜像
 
 ```bash

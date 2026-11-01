@@ -53,7 +53,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// Waits for the first stop request.
+///
+/// `docker stop`, `systemctl stop` and Kubernetes all send SIGTERM, not SIGINT;
+/// listening only for Ctrl-C meant those stops killed the process outright and
+/// the pending counter batch was lost.
 async fn shutdown() {
-    let _ = tokio::signal::ctrl_c().await;
-    info!("shutting down");
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        match signal(SignalKind::terminate()) {
+            Ok(mut terminate) => {
+                tokio::select! {
+                    _ = terminate.recv() => info!(signal = "SIGTERM", "shutting down"),
+                    _ = tokio::signal::ctrl_c() => info!(signal = "SIGINT", "shutting down"),
+                }
+            }
+            Err(err) => {
+                tracing::warn!(error = %err, "SIGTERM handler unavailable, waiting for Ctrl-C only");
+                let _ = tokio::signal::ctrl_c().await;
+                info!(signal = "SIGINT", "shutting down");
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+        info!(signal = "SIGINT", "shutting down");
+    }
 }
