@@ -11,7 +11,7 @@ use axum::Json;
 use rusqlite::{params, Connection};
 use serde_json::{json, Value};
 
-use crate::api::{ApiError, ApiResult};
+use crate::error::{ApiError, ApiResult};
 use crate::auth::TenantId;
 use crate::db::now;
 use crate::state::Shared;

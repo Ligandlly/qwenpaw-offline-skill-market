@@ -10,6 +10,7 @@
 #![allow(dead_code)]
 
 use std::sync::MutexGuard;
+use std::time::Duration;
 
 use axum::body::{Body, Bytes};
 use axum::http::{HeaderMap, Request, StatusCode};
@@ -45,6 +46,7 @@ pub fn test_config() -> Config {
         admin_user: ADMIN_USER.into(),
         admin_password: ADMIN_PASSWORD.into(),
         log_level: "warn".into(),
+        request_timeout: Duration::from_secs(30),
         limits: Limits {
             max_bundle_bytes: 2 * 1024 * 1024,
             max_files: 100,

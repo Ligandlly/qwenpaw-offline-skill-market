@@ -159,18 +159,14 @@ pub fn now() -> i64 {
         .unwrap_or(0)
 }
 
-pub fn audit(
-    conn: &Connection,
-    actor: &str,
-    action: &str,
-    slug: Option<&str>,
-    version: Option<&str>,
-    detail: Option<&str>,
-) -> rusqlite::Result<()> {
-    audit_kind(conn, "skill", actor, action, slug, version, detail)
-}
+/// Audit tags: which plane an entry belongs to.
+pub const AUDIT_SKILL: &str = "skill";
+pub const AUDIT_AGENT: &str = "agent";
+/// Sign-in and other events that belong to no skill or agent.
+pub const AUDIT_ADMIN: &str = "admin";
 
-/// Same audit trail, tagged so the admin UI can tell skills from agents.
+/// One audit trail, tagged by what the entry is about (`skill`, `agent`, or
+/// `admin` for sign-in events) so the admin UI can filter by plane.
 pub fn audit_kind(
     conn: &Connection,
     kind: &str,

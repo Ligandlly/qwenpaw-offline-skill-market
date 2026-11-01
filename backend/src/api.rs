@@ -1,203 +1,24 @@
 //! Tenant-facing API. Every route here is called by the QwenPaw plugin
 //! (browser → plugin route → backend), so `X-Tenant-Id` is always present.
+//!
+//! `ApiError`/`ApiResult` live in `crate::error` and the request shapes in
+//! `crate::dto`: this module is one of four that returns them, not their owner.
 
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
-use axum::response::{IntoResponse, Response};
 use axum::Json;
-use pinyin::ToPinyin;
-use rusqlite::{params, Row};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use tracing::{debug, error, info, warn};
 
 use crate::auth::TenantId;
-use crate::db::{audit, now};
-use crate::limits::{self, FileData, Reject, MANIFEST};
+use crate::dto::{default_visibility, ListQuery, LookupQuery};
+use crate::error::{ApiError, ApiResult};
+use crate::limits::{self, FileData, MANIFEST};
+use crate::market;
+use crate::slug::{clean_publisher_name, derive_slug};
 use crate::state::Shared;
-
-// ---------------------------------------------------------------- errors ---
-
-#[derive(Debug)]
-pub struct ApiError {
-    pub status: StatusCode,
-    pub code: &'static str,
-    pub message: String,
-}
-
-impl ApiError {
-    pub fn new(status: StatusCode, code: &'static str, message: impl Into<String>) -> Self {
-        Self {
-            status,
-            code,
-            message: message.into(),
-        }
-    }
-
-    pub(crate) fn not_found(what: &str) -> Self {
-        Self::new(StatusCode::NOT_FOUND, "not_found", what)
-    }
-
-    pub(crate) fn db(err: rusqlite::Error) -> Self {
-        error!(error = %err, "database error");
-        Self::new(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "db_error",
-            format!("数据库错误：{err}"),
-        )
-    }
-
-    pub(crate) fn forbidden(message: impl Into<String>) -> Self {
-        Self::new(StatusCode::FORBIDDEN, "forbidden", message)
-    }
-
-    pub(crate) fn conflict(code: &'static str, message: impl Into<String>) -> Self {
-        Self::new(StatusCode::CONFLICT, code, message)
-    }
-}
-
-impl From<Reject> for ApiError {
-    fn from(reject: Reject) -> Self {
-        Self::new(StatusCode::BAD_REQUEST, reject.code, reject.message)
-    }
-}
-
-impl IntoResponse for ApiError {
-    fn into_response(self) -> Response {
-        (
-            self.status,
-            Json(json!({ "error": { "code": self.code, "message": self.message } })),
-        )
-            .into_response()
-    }
-}
-
-pub(crate) type ApiResult<T> = Result<T, ApiError>;
-
-// ----------------------------------------------------------------- models ---
-
-#[derive(Debug, Clone, Serialize)]
-pub struct SkillRow {
-    pub slug: String,
-    pub name: String,
-    /// `description` from the latest version's `SKILL.md` frontmatter, so the
-    /// 市场 listing can show the same 描述 the host shows for installs.
-    pub description: Option<String>,
-    pub owner_tenant: String,
-    /// Publisher name the tenant reported, or `null` for skills published
-    /// before anyone reported one. Display only; never used for access.
-    pub owner_name: Option<String>,
-    pub visibility: String,
-    pub latest_version: Option<String>,
-    pub created_at: i64,
-    /// Newest version upload time, falling back to the entry's `created_at`.
-    /// Drives the market's "最近更新" sort.
-    pub updated_at: i64,
-    pub download_count: i64,
-    pub withdrawn_at: Option<i64>,
-    pub takedown_at: Option<i64>,
-    pub takedown_reason: Option<String>,
-    pub versions: i64,
-    pub size_bytes: i64,
-    pub install_url: Option<String>,
-}
-
-fn row_to_skill(row: &Row<'_>, public_url: &str) -> rusqlite::Result<SkillRow> {
-    let slug: String = row.get("slug")?;
-    let latest: Option<String> = row.get("latest_version")?;
-    let install_url = latest
-        .as_ref()
-        .map(|version| format!("{public_url}/skills/{slug}/{version}"));
-    Ok(SkillRow {
-        slug,
-        name: row.get("name")?,
-        description: row_description(row)?,
-        owner_tenant: row.get("owner_tenant")?,
-        owner_name: row.get("owner_name")?,
-        visibility: row.get("visibility")?,
-        latest_version: latest,
-        created_at: row.get("created_at")?,
-        updated_at: row.get("updated_at")?,
-        download_count: row.get("download_count")?,
-        withdrawn_at: row.get("withdrawn_at")?,
-        takedown_at: row.get("takedown_at")?,
-        takedown_reason: row.get("takedown_reason")?,
-        versions: row.get("versions")?,
-        size_bytes: row.get("size_bytes")?,
-        install_url,
-    })
-}
-
-/// Description for a row produced by a select carrying the `manifest` column
-/// (see [`SKILL_SELECT`]).
-pub(crate) fn row_description(row: &Row<'_>) -> rusqlite::Result<Option<String>> {
-    Ok(row
-        .get::<_, Option<String>>("manifest")?
-        .as_deref()
-        .and_then(limits::manifest_description))
-}
-
-/// `description` is not a column on purpose: it lives in the latest version's
-/// `SKILL.md`, which is the only source that cannot fall out of sync — and it
-/// works for rows published before the column existed. The key needs quoting:
-/// `$.SKILL.md` would be read as a nested path.
-const SKILL_SELECT: &str = r#"
-SELECT s.slug, s.name, s.owner_tenant, t.display_name AS owner_name, s.visibility,
-       s.latest_version,
-       s.created_at, s.withdrawn_at, s.takedown_at, s.takedown_reason,
-       s.download_count,
-       COALESCE((SELECT MAX(v.created_at) FROM skill_versions v WHERE v.slug = s.slug),
-                s.created_at) AS updated_at,
-       (SELECT json_extract(v.bundle_json, '$."SKILL.md"')
-          FROM skill_versions v
-         WHERE v.slug = s.slug AND v.version = s.latest_version) AS manifest,
-       COALESCE((SELECT COUNT(*) FROM skill_versions v WHERE v.slug = s.slug), 0) AS versions,
-       COALESCE((SELECT SUM(size_bytes) FROM skill_versions v WHERE v.slug = s.slug), 0) AS size_bytes
-FROM skills s
-LEFT JOIN tenants t ON t.id = s.owner_tenant
-"#;
-
-// ---------------------------------------------------------------- handlers ---
-
-#[derive(Debug, Deserialize)]
-pub struct ListQuery {
-    #[serde(default)]
-    pub q: String,
-    #[serde(default = "one")]
-    pub page: i64,
-    #[serde(default = "twenty")]
-    pub limit: i64,
-    /// `created` (default) | `downloads` | `updated`.
-    #[serde(default)]
-    pub sort: String,
-}
-
-/// Whitelisted sort keys; anything else degrades to the historical order.
-pub(crate) fn normalize_sort(sort: &str) -> &'static str {
-    match sort {
-        "downloads" => "downloads",
-        "updated" => "updated",
-        _ => "created",
-    }
-}
-
-/// Whitelisted ORDER BY for the market listing. Never interpolate user input
-/// into SQL; unknown values fall back to the historical newest-first order.
-pub(crate) fn skill_order(sort: &str) -> &'static str {
-    match normalize_sort(sort) {
-        "downloads" => "s.download_count DESC, s.created_at DESC",
-        "updated" => "updated_at DESC, s.created_at DESC",
-        _ => "s.created_at DESC",
-    }
-}
-
-fn one() -> i64 {
-    1
-}
-fn twenty() -> i64 {
-    20
-}
 
 /// GET /api/v1/limits — the plugin mirrors these instead of hard-coding them.
 pub async fn get_limits(State(app): State<Shared>) -> Json<Value> {
@@ -216,78 +37,14 @@ pub async fn list_skills(
     tenant: TenantId,
     Query(q): Query<ListQuery>,
 ) -> ApiResult<Json<Value>> {
-    let limit = q.limit.clamp(1, 50);
-    let offset = (q.page.max(1) - 1) * limit;
-    let pattern = format!("%{}%", q.q.trim());
-    let order = skill_order(&q.sort);
-
     let db = app.db();
-    db.execute(
-        "INSERT INTO tenants (id, first_seen, last_seen) VALUES (?1, ?2, ?2)
-         ON CONFLICT(id) DO UPDATE SET last_seen = excluded.last_seen",
-        params![tenant.0, now()],
-    )
-    .map_err(ApiError::db)?;
-
-    let total: i64 = db
-        .query_row(
-            "SELECT COUNT(*) FROM skills s
-             WHERE s.takedown_at IS NULL AND s.withdrawn_at IS NULL
-               AND (s.visibility = 'public' OR s.owner_tenant = ?1)
-               AND (s.slug LIKE ?2 OR s.name LIKE ?2)",
-            params![tenant.0, pattern],
-            |row| row.get(0),
-        )
-        .map_err(ApiError::db)?;
-
-    let sql = format!(
-        "{SKILL_SELECT}
-         WHERE s.takedown_at IS NULL AND s.withdrawn_at IS NULL
-           AND (s.visibility = 'public' OR s.owner_tenant = ?1)
-           AND (s.slug LIKE ?2 OR s.name LIKE ?2)
-         ORDER BY {order}
-         LIMIT ?3 OFFSET ?4"
-    );
-    let mut stmt = db.prepare(&sql).map_err(ApiError::db)?;
-    let rows = stmt
-        .query_map(params![tenant.0, pattern, limit, offset], |row| {
-            row_to_skill(row, &app.cfg.public_url)
-        })
-        .map_err(ApiError::db)?
-        .collect::<rusqlite::Result<Vec<_>>>()
-        .map_err(ApiError::db)?;
-
-    debug!(
-        tenant = %tenant.0,
-        q = %q.q,
-        page = q.page,
-        limit,
-        items = rows.len(),
-        "market listing"
-    );
-    Ok(Json(json!({
-        "page": q.page.max(1),
-        "limit": limit,
-        "total": total,
-        "sort": normalize_sort(&q.sort),
-        "items": rows
-    })))
+    market::list_page(&db, &market::SKILL, &tenant.0, &q, &app.cfg.public_url).map(Json)
 }
 
 /// GET /api/v1/skills/mine — everything the tenant owns, including withdrawn.
 pub async fn list_mine(State(app): State<Shared>, tenant: TenantId) -> ApiResult<Json<Value>> {
     let db = app.db();
-    let sql = format!("{SKILL_SELECT} WHERE s.owner_tenant = ?1 ORDER BY s.created_at DESC");
-    let mut stmt = db.prepare(&sql).map_err(ApiError::db)?;
-    let rows = stmt
-        .query_map(params![tenant.0], |row| {
-            row_to_skill(row, &app.cfg.public_url)
-        })
-        .map_err(ApiError::db)?
-        .collect::<rusqlite::Result<Vec<_>>>()
-        .map_err(ApiError::db)?;
-    debug!(tenant = %tenant.0, items = rows.len(), "own skills");
-    Ok(Json(json!({ "items": rows })))
+    market::list_owned(&db, &market::SKILL, &tenant.0, &app.cfg.public_url).map(Json)
 }
 
 /// GET /api/v1/skills/{slug}/status — drives the "已下架" badge on installs.
@@ -297,47 +54,7 @@ pub async fn skill_status(
     Path(slug): Path<String>,
 ) -> ApiResult<Json<Value>> {
     let db = app.db();
-    let mut stmt = db
-        .prepare(
-            "SELECT slug, name, owner_tenant, visibility, latest_version, withdrawn_at,
-                    takedown_at, takedown_reason
-             FROM skills WHERE slug = ?1",
-        )
-        .map_err(ApiError::db)?;
-    let mut rows = stmt.query(params![slug]).map_err(ApiError::db)?;
-    let Some(row) = rows.next().map_err(ApiError::db)? else {
-        debug!(tenant = %tenant.0, slug = %slug, "status: unknown skill");
-        return Err(ApiError::not_found("技能不存在"));
-    };
-    let owner: String = row.get("owner_tenant").map_err(ApiError::db)?;
-    let visibility: String = row.get("visibility").map_err(ApiError::db)?;
-    if owner != tenant.0 && visibility != "public" {
-        debug!(
-            tenant = %tenant.0,
-            slug = %slug,
-            owner = %owner,
-            visibility = %visibility,
-            "status: not visible to tenant"
-        );
-        return Err(ApiError::not_found("技能不存在"));
-    }
-    let withdrawn_at: Option<i64> = row.get("withdrawn_at").map_err(ApiError::db)?;
-    let takedown_at: Option<i64> = row.get("takedown_at").map_err(ApiError::db)?;
-    let state = if takedown_at.is_some() {
-        "taken_down"
-    } else if withdrawn_at.is_some() {
-        "withdrawn"
-    } else {
-        "active"
-    };
-    debug!(tenant = %tenant.0, slug = %slug, state = %state, "status");
-    Ok(Json(json!({
-        "slug": row.get::<_, String>("slug").map_err(ApiError::db)?,
-        "name": row.get::<_, String>("name").map_err(ApiError::db)?,
-        "latest_version": row.get::<_, Option<String>>("latest_version").map_err(ApiError::db)?,
-        "state": state,
-        "takedown_reason": row.get::<_, Option<String>>("takedown_reason").map_err(ApiError::db)?,
-    })))
+    market::status(&db, &market::SKILL, &tenant.0, &slug).map(Json)
 }
 
 #[derive(Debug, Deserialize)]
@@ -355,10 +72,6 @@ pub struct PublishRequest {
     pub files: BTreeMap<String, FileData>,
 }
 
-fn default_visibility() -> String {
-    "public".to_string()
-}
-
 #[derive(Debug, Deserialize)]
 pub struct SlugQuery {
     #[serde(default)]
@@ -374,13 +87,6 @@ pub async fn preview_slug(Query(query): Query<SlugQuery>) -> Json<Value> {
     Json(json!({ "name": query.name, "slug": derive_slug(&query.name) }))
 }
 
-#[derive(Debug, Deserialize)]
-pub struct LookupQuery {
-    /// Comma-separated display names, as the QwenPaw host reports them.
-    #[serde(default)]
-    pub names: String,
-}
-
 /// GET /api/v1/skills/lookup?names=a,b — display name -> market slug + state.
 ///
 /// The host stores hub installs under the *display* name and its skill list
@@ -392,71 +98,8 @@ pub async fn lookup_skills(
     tenant: TenantId,
     Query(query): Query<LookupQuery>,
 ) -> ApiResult<Json<Value>> {
-    let wanted: Vec<&str> = query
-        .names
-        .split(',')
-        .map(str::trim)
-        .filter(|name| !name.is_empty() && name.len() <= 128)
-        .take(100)
-        .collect();
-    if wanted.is_empty() {
-        return Ok(Json(json!({ "items": [] })));
-    }
-
-    let placeholders = (0..wanted.len())
-        .map(|index| format!("?{}", index + 2))
-        .collect::<Vec<_>>()
-        .join(",");
-    let sql = format!(
-        "SELECT slug, name, owner_tenant, visibility, latest_version,
-                withdrawn_at, takedown_at, takedown_reason
-         FROM skills
-         WHERE name IN ({placeholders}) AND (visibility = 'public' OR owner_tenant = ?1)"
-    );
-
     let db = app.db();
-    let mut stmt = db.prepare(&sql).map_err(ApiError::db)?;
-    let mut params: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(tenant.0.clone())];
-    for name in &wanted {
-        params.push(Box::new((*name).to_string()));
-    }
-    let refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
-    let items = stmt
-        .query_map(refs.as_slice(), |row| {
-            let takedown_at: Option<i64> = row.get("takedown_at")?;
-            let withdrawn_at: Option<i64> = row.get("withdrawn_at")?;
-            let state = if takedown_at.is_some() {
-                "taken_down"
-            } else if withdrawn_at.is_some() {
-                "withdrawn"
-            } else {
-                "active"
-            };
-            Ok(json!({
-                "slug": row.get::<_, String>("slug")?,
-                "name": row.get::<_, String>("name")?,
-                "owner_tenant": row.get::<_, String>("owner_tenant")?,
-                "visibility": row.get::<_, String>("visibility")?,
-                "latest_version": row.get::<_, Option<String>>("latest_version")?,
-                "state": state,
-                "takedown_reason": row.get::<_, Option<String>>("takedown_reason")?,
-                "install_url": match row.get::<_, Option<String>>("latest_version")? {
-                    Some(version) => format!("{}/skills/{}/{}", app.cfg.public_url, row.get::<_, String>("slug")?, version),
-                    None => String::new(),
-                },
-            }))
-        })
-        .map_err(ApiError::db)?
-        .collect::<rusqlite::Result<Vec<_>>>()
-        .map_err(ApiError::db)?;
-
-    debug!(
-        tenant = %tenant.0,
-        wanted = wanted.len(),
-        found = items.len(),
-        "lookup"
-    );
-    Ok(Json(json!({ "items": items })))
+    market::lookup(&db, &market::SKILL, &tenant.0, &query.names, &app.cfg.public_url).map(Json)
 }
 
 /// POST /api/v1/skills — publish an immutable version.
@@ -466,42 +109,14 @@ pub async fn publish(
     Json(body): Json<PublishRequest>,
 ) -> ApiResult<(StatusCode, Json<Value>)> {
     let publisher = clean_publisher_name(body.publisher_name.as_deref());
-    if !matches!(body.visibility.as_str(), "public" | "tenant") {
-        return Err(ApiError::new(
-            StatusCode::BAD_REQUEST,
-            "invalid_visibility",
-            "可见范围只能是 public 或 tenant",
-        ));
-    }
-    if !limits::valid_version(&body.version) {
-        return Err(ApiError::new(
-            StatusCode::BAD_REQUEST,
-            "invalid_version",
-            "版本号需为 1-32 位，只能包含 0-9 A-Z a-z . + -，且以字母或数字开头",
-        ));
-    }
-    let slug = match body
-        .slug
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
-        Some(slug) => slug.to_string(),
-        None => derive_slug(&body.name).ok_or_else(|| {
-            ApiError::new(
-                StatusCode::BAD_REQUEST,
-                "invalid_slug",
-                "无法从名称推导出标识符，请手动填写一个只含小写字母、数字和 - 的标识符",
-            )
-        })?,
-    };
-    if !limits::valid_slug(&slug) {
-        return Err(ApiError::new(
-            StatusCode::BAD_REQUEST,
-            "invalid_slug",
-            "标识符需为 1-64 位，只能包含小写字母、数字和 -，且以字母或数字开头",
-        ));
-    }
+    market::require_fields(&body.version, &body.visibility)?;
+    let slug = market::required_slug(
+        &market::SKILL,
+        &app,
+        &tenant.0,
+        &body.name,
+        body.slug.as_deref(),
+    )?;
 
     let checked = match limits::check_bundle(&body.name, &body.files, &app.cfg.limits) {
         Ok(checked) => checked,
@@ -518,142 +133,62 @@ pub async fn publish(
         }
     };
 
+    // Serialise before opening the transaction: a bundle that cannot be
+    // written must abort the publish, not leave a row whose contents are an
+    // empty string (versions are immutable, so that row would be permanent).
+    let bundle_json = serde_json::to_string(&checked.files).map_err(|err| {
+        error!(error = %err, "bundle serialization failed");
+        ApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal",
+            "技能内容无法序列化",
+        )
+    })?;
+
     let db = app.db();
     let actor = tenant.actor();
-    // `publisher` is only written when the plugin actually sent one: a publish
-    // without it must not wipe the name an earlier one recorded.
-    db.execute(
-        "INSERT INTO tenants (id, first_seen, last_seen, display_name) VALUES (?1, ?2, ?2, ?3)
-         ON CONFLICT(id) DO UPDATE SET last_seen = excluded.last_seen,
-             display_name = COALESCE(excluded.display_name, tenants.display_name)",
-        params![tenant.0, now(), publisher],
-    )
-    .map_err(ApiError::db)?;
+    market::record_tenant(&db, &tenant.0, publisher.as_deref())?;
 
-    let existing: Option<(String, Option<i64>)> = db
-        .query_row(
-            "SELECT owner_tenant, takedown_at FROM skills WHERE slug = ?1",
-            params![slug],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .ok();
-    if let Some((owner, takedown_at)) = &existing {
-        if owner != &tenant.0 {
-            warn!(
-                tenant = %tenant.0,
-                slug = %slug,
-                owner = %owner,
-                "publish rejected: slug belongs to another tenant"
-            );
-            return Err(ApiError::forbidden(format!(
-                "标识符 '{slug}' 已被其他团队占用"
-            )));
-        }
-        if takedown_at.is_some() {
-            warn!(
-                tenant = %tenant.0,
-                slug = %slug,
-                "publish rejected: skill is taken down"
-            );
-            return Err(ApiError::conflict(
-                "taken_down",
+    // An existing row means either our own entry or someone else's slug: the
+    // guard is the same one withdraw/restore use, so a publish cannot slip past
+    // a takedown or steal another team's identifier.
+    let previous = match market::listing(&db, &market::SKILL, &slug)? {
+        Some(claim) => {
+            claim.guard(
+                &tenant.0,
+                &format!("标识符 '{slug}' 已被其他团队占用"),
                 "该技能已被管理员下架，不能再发布",
-            ));
+            )?;
+            claim.latest_version
         }
-    }
-
-    let tx = db.unchecked_transaction().map_err(ApiError::db)?;
-    tx.execute(
-        "INSERT INTO skills (slug, name, owner_tenant, visibility, latest_version, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-         ON CONFLICT(slug) DO UPDATE SET name = excluded.name, visibility = excluded.visibility",
-        params![
-            slug,
-            checked.name,
-            tenant.0,
-            body.visibility,
-            body.version,
-            now()
-        ],
-    )
-    .map_err(ApiError::db)?;
-
-    let inserted = tx.execute(
-        "INSERT OR IGNORE INTO skill_versions
-           (slug, version, sha256, size_bytes, file_count, bundle_json, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-        params![
-            slug,
-            body.version,
-            checked.sha256,
-            checked.size_bytes as i64,
-            checked.files.len() as i64,
-            serde_json::to_string(&checked.files).unwrap_or_default(),
-            now()
-        ],
-    );
-    let inserted = match inserted {
-        Ok(n) => n,
-        Err(err) => return Err(ApiError::db(err)),
+        None => None,
     };
-    if inserted == 0 {
-        warn!(
-            tenant = %tenant.0,
-            slug = %slug,
-            version = %body.version,
-            "publish rejected: version already exists"
-        );
-        return Err(ApiError::conflict(
-            "version_exists",
-            format!(
-                "版本 {} 已存在且不可修改，请不要重复发布同一个版本号",
-                body.version
-            ),
-        ));
-    }
 
-    // latest pointer: only move forward (a late publish of an old version must
-    // not roll the market back), and clear an owner-initiated withdrawal.
-    let current: Option<String> = tx
-        .query_row(
-            "SELECT latest_version FROM skills WHERE slug = ?1",
-            params![slug],
-            |row| row.get(0),
-        )
-        .map_err(ApiError::db)?;
-    let advance = current
-        .as_deref()
-        .map(|cur| compare_versions(&body.version, cur).is_gt())
-        .unwrap_or(true);
-    if advance {
-        tx.execute(
-            "UPDATE skills SET latest_version = ?2 WHERE slug = ?1",
-            params![slug, body.version],
-        )
-        .map_err(ApiError::db)?;
-    }
-    tx.execute(
-        "UPDATE skills SET withdrawn_at = NULL, withdrawn_by = NULL
-         WHERE slug = ?1 AND withdrawn_at IS NOT NULL",
-        params![slug],
-    )
-    .map_err(ApiError::db)?;
-
-    audit(
-        &tx,
+    let file_count = checked.files.len();
+    let detail = format!(
+        "{file_count} files, {} bytes, visibility={}",
+        checked.size_bytes, body.visibility
+    );
+    let advances = market::store(
+        &db,
+        &market::SKILL,
+        market::Publish {
+            slug: &slug,
+            tenant: &tenant.0,
+            version: &body.version,
+            visibility: &body.visibility,
+            name: &checked.name,
+            description: None,
+            file_count,
+            skill_count: None,
+            size_bytes: checked.size_bytes,
+            sha256: &checked.sha256,
+            bundle_json,
+            previous,
+        },
+        &detail,
         &actor,
-        "publish",
-        Some(&slug),
-        Some(&body.version),
-        Some(&format!(
-            "{} files, {} bytes, visibility={}",
-            checked.files.len(),
-            checked.size_bytes,
-            body.visibility
-        )),
-    )
-    .map_err(ApiError::db)?;
-    tx.commit().map_err(ApiError::db)?;
+    )?;
 
     info!(
         tenant = %tenant.0,
@@ -661,10 +196,10 @@ pub async fn publish(
         version = %body.version,
         visibility = %body.visibility,
         publisher = publisher.as_deref().unwrap_or("-"),
-        files = checked.files.len(),
+        files = file_count,
         bytes = checked.size_bytes,
         sha256 = %checked.sha256,
-        latest = advance,
+        latest = advances.advanced,
         "published"
     );
     Ok((
@@ -674,9 +209,9 @@ pub async fn publish(
             "version": body.version,
             "sha256": checked.sha256,
             "size_bytes": checked.size_bytes,
-            "file_count": checked.files.len(),
-            "latest_version": if advance { json!(body.version) } else { json!(current) },
-            "install_url": format!("{}/skills/{}/{}", app.cfg.public_url, slug, body.version),
+            "file_count": file_count,
+            "latest_version": advances.latest_version,
+            "install_url": (market::SKILL.bundle_url)(&app.cfg.public_url, &slug, &body.version),
         })),
     ))
 }
@@ -685,38 +220,6 @@ pub async fn publish(
 pub struct WithdrawRequest {
     #[serde(default)]
     pub reason: Option<String>,
-}
-
-/// Bump the patch component of ``x.y.z`` for the "publish a new version" hint.
-/// Anything unexpected (a tag like ``v1``, a date, four components) yields
-/// ``None`` and the form keeps whatever the user typed.
-fn suggest_next_version(latest: &str) -> Option<String> {
-    let parts: Vec<&str> = latest.trim().split('.').collect();
-    if parts.len() != 3 {
-        return None;
-    }
-    let mut numbers = [0u64; 3];
-    for (slot, part) in numbers.iter_mut().zip(parts.iter()) {
-        if part.is_empty() || !part.bytes().all(|b| b.is_ascii_digit()) {
-            return None;
-        }
-        *slot = part.parse().ok()?;
-    }
-    Some(format!(
-        "{}.{}.{}",
-        numbers[0],
-        numbers[1],
-        numbers[2].checked_add(1)?
-    ))
-}
-
-/// The slate a publish would land on, as the dry run reports it back.
-struct ExistingSkill {
-    name: String,
-    owner_tenant: String,
-    latest_version: Option<String>,
-    takedown_at: Option<i64>,
-    withdrawn_at: Option<i64>,
 }
 
 /// POST /api/v1/skills/validate — dry run of a publish.
@@ -730,120 +233,29 @@ pub async fn validate(
     tenant: TenantId,
     Json(body): Json<PublishRequest>,
 ) -> ApiResult<Json<Value>> {
-    let mut problems: Vec<Value> = Vec::new();
-    let mut push = |code: &str, message: String| {
-        problems.push(json!({ "code": code, "message": message }));
-    };
-
-    if !matches!(body.visibility.as_str(), "public" | "tenant") {
-        push(
-            "invalid_visibility",
-            "可见范围只能是 public 或 tenant".into(),
-        );
-    }
-    if !limits::valid_version(&body.version) {
-        push(
-            "invalid_version",
-            "版本号需为 1-32 位，只能包含 0-9 A-Z a-z . + -，且以字母或数字开头".into(),
-        );
-    }
-
-    let slug = match body
-        .slug
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
-        Some(slug) => Some(slug.to_string()),
-        None => derive_slug(&body.name),
-    };
-    match &slug {
-        None => push(
-            "invalid_slug",
-            "无法从名称推导出标识符，请手动填写一个只含小写字母、数字和 - 的标识符".into(),
-        ),
-        Some(slug) if !limits::valid_slug(slug) => push(
-            "invalid_slug",
-            "标识符需为 1-64 位，只能包含小写字母、数字和 -，且以字母或数字开头".into(),
-        ),
-        Some(_) => {}
-    }
+    let mut problems: Vec<market::Problem> = Vec::new();
+    market::check_fields(&body.version, &body.visibility, &mut problems);
+    let slug = market::resolve_slug(
+        &market::SKILL,
+        &app,
+        &tenant.0,
+        &body.name,
+        body.slug.as_deref(),
+        &mut problems,
+    );
 
     let (_checked, rejects) = limits::review_bundle(&body.name, &body.files, &app.cfg.limits);
-    for reject in rejects {
-        push(reject.code, reject.message);
-    }
+    problems.extend(rejects.into_iter().map(market::Problem::from));
 
     // Slate-level checks: only meaningful once the slug is a real string, and
     // the same rules the publish path applies.
-    let mut existing: Option<Value> = None;
-    let mut next_version: Option<String> = None;
-    if let Some(slug) = slug.as_deref().filter(|s| limits::valid_slug(s)) {
-        let db = app.db();
-        let row: Option<ExistingSkill> = db
-            .query_row(
-                "SELECT name, owner_tenant, latest_version, takedown_at, withdrawn_at
-                 FROM skills WHERE slug = ?1",
-                params![slug],
-                |row| {
-                    Ok(ExistingSkill {
-                        name: row.get(0)?,
-                        owner_tenant: row.get(1)?,
-                        latest_version: row.get(2)?,
-                        takedown_at: row.get(3)?,
-                        withdrawn_at: row.get(4)?,
-                    })
-                },
-            )
-            .ok();
-        if let Some(ExistingSkill {
-            name,
-            owner_tenant: owner,
-            latest_version: latest,
-            takedown_at,
-            withdrawn_at,
-        }) = row
-        {
-            let mine = owner == tenant.0;
-            if mine {
-                next_version = latest.as_deref().and_then(suggest_next_version);
-                if takedown_at.is_some() {
-                    push("taken_down", "该技能已被管理员下架，不能再发布".into());
-                }
-            } else {
-                push("slug_taken", format!("标识符 '{slug}' 已被其他团队占用"));
-            }
-            existing = Some(json!({
-                "name": name,
-                "owner_tenant": owner,
-                "latest_version": latest,
-                "state": if takedown_at.is_some() {
-                    "taken_down"
-                } else if withdrawn_at.is_some() {
-                    "withdrawn"
-                } else {
-                    "active"
-                },
-                "mine": mine,
-            }));
+    let (existing, next_version) = match slug.as_deref().filter(|slug| limits::valid_slug(slug)) {
+        Some(slug) => {
+            let db = app.db();
+            market::inspect(&db, &market::SKILL, &tenant.0, slug, &body.version, &mut problems)?
         }
-        let taken: i64 = db
-            .query_row(
-                "SELECT COUNT(*) FROM skill_versions WHERE slug = ?1 AND version = ?2",
-                params![slug, body.version],
-                |row| row.get(0),
-            )
-            .unwrap_or(0);
-        if taken > 0 {
-            push(
-                "version_exists",
-                format!(
-                    "版本 {} 已存在且不可修改，请不要重复发布同一个版本号",
-                    body.version
-                ),
-            );
-        }
-    }
+        None => (None, None),
+    };
 
     // A manifest that parses is worth showing: the page previews the name and
     // description the host will display after install.
@@ -854,41 +266,28 @@ pub async fn validate(
         .and_then(|text| limits::manifest_meta(text).ok())
         .map(|(name, description)| json!({ "name": name, "description": description }));
 
-    let file_count = body.files.len();
-    let size_bytes: usize = body.files.values().map(|content| content.len()).sum();
-    let files: Vec<Value> = body
-        .files
-        .iter()
-        .map(|(path, content)| json!({ "path": path, "size_bytes": content.len() }))
-        .collect();
-
     debug!(
         tenant = %tenant.0,
         slug = slug.as_deref().unwrap_or("-"),
-        files = file_count,
+        files = body.files.len(),
         problems = problems.len(),
         "validate"
     );
-
-    Ok(Json(json!({
-        "ok": problems.is_empty(),
-        "slug": slug,
-        "name": body.name.trim(),
-        "version": body.version,
-        "visibility": body.visibility,
-        "file_count": file_count,
-        "size_bytes": size_bytes,
-        "files": files,
-        "manifest": manifest,
-        "existing": existing,
-        "next_version": next_version,
-        "limits": {
-            "max_files": app.cfg.limits.max_files,
-            "max_file_bytes": app.cfg.limits.max_file_bytes,
-            "max_bundle_bytes": app.cfg.limits.max_bundle_bytes,
-        },
-        "problems": problems,
-    })))
+    Ok(Json(
+        market::Answer {
+            cfg: &app.cfg,
+            name: body.name.clone(),
+            version: body.version.clone(),
+            visibility: body.visibility.clone(),
+            slug,
+            files: &body.files,
+            manifest,
+            existing,
+            next_version,
+            problems,
+        }
+        .to_json(),
+    ))
 }
 
 /// POST /api/v1/skills/{slug}/withdraw — owner may pull its own skill.
@@ -900,46 +299,15 @@ pub async fn withdraw(
 ) -> ApiResult<Json<Value>> {
     let reason = body.and_then(|Json(b)| b.reason);
     let db = app.db();
-    let (owner, takedown_at): (String, Option<i64>) = db
-        .query_row(
-            "SELECT owner_tenant, takedown_at FROM skills WHERE slug = ?1",
-            params![slug],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .map_err(|_| ApiError::not_found("技能不存在"))?;
-    if owner != tenant.0 {
-        warn!(tenant = %tenant.0, slug = %slug, "withdraw rejected: not the owner");
-        return Err(ApiError::forbidden("只有发布者所在团队才能下架"));
-    }
-    if takedown_at.is_some() {
-        warn!(
-            tenant = %tenant.0,
-            slug = %slug,
-            "withdraw rejected: skill is taken down"
-        );
-        return Err(ApiError::conflict("taken_down", "该条目已被管理员下架"));
-    }
-    db.execute(
-        "UPDATE skills SET withdrawn_at = ?2, withdrawn_by = ?3 WHERE slug = ?1",
-        params![slug, now(), tenant.0],
-    )
-    .map_err(ApiError::db)?;
-    info!(
-        tenant = %tenant.0,
-        slug = %slug,
-        reason = reason.as_deref().unwrap_or("-"),
-        "withdrawn"
-    );
-    audit(
-        db_ref(&db),
-        &tenant.actor(),
-        "withdraw",
-        Some(&slug),
-        None,
-        reason.as_deref(),
-    )
-    .map_err(ApiError::db)?;
-    Ok(Json(json!({ "slug": slug, "state": "withdrawn" })))
+    let claim = market::listing(&db, &market::SKILL, &slug)?
+        .ok_or_else(|| ApiError::not_found("技能不存在"))?;
+    claim.guard(
+        &tenant.0,
+        "只有发布者所在团队才能下架",
+        "该条目已被管理员下架",
+    )?;
+    let change = market::Change::Withdraw { reason };
+    market::change_state(&db, &market::SKILL, &slug, change, &tenant.actor()).map(Json)
 }
 
 /// POST /api/v1/skills/{slug}/restore — reversible unless an admin took it down.
@@ -949,48 +317,14 @@ pub async fn restore(
     Path(slug): Path<String>,
 ) -> ApiResult<Json<Value>> {
     let db = app.db();
-    let (owner, takedown_at): (String, Option<i64>) = db
-        .query_row(
-            "SELECT owner_tenant, takedown_at FROM skills WHERE slug = ?1",
-            params![slug],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .map_err(|_| ApiError::not_found("技能不存在"))?;
-    if owner != tenant.0 {
-        warn!(
-            tenant = %tenant.0,
-            slug = %slug,
-            "restore rejected: not the owner"
-        );
-        return Err(ApiError::forbidden("只有发布者所在团队才能重新上架"));
-    }
-    if takedown_at.is_some() {
-        warn!(
-            tenant = %tenant.0,
-            slug = %slug,
-            "restore rejected: skill is taken down"
-        );
-        return Err(ApiError::conflict(
-            "taken_down",
-            "该技能由管理员下架，不能自行恢复上架",
-        ));
-    }
-    db.execute(
-        "UPDATE skills SET withdrawn_at = NULL, withdrawn_by = NULL WHERE slug = ?1",
-        params![slug],
-    )
-    .map_err(ApiError::db)?;
-    info!(tenant = %tenant.0, slug = %slug, "restored");
-    audit(
-        db_ref(&db),
-        &tenant.actor(),
-        "restore",
-        Some(&slug),
-        None,
-        None,
-    )
-    .map_err(ApiError::db)?;
-    Ok(Json(json!({ "slug": slug, "state": "active" })))
+    let claim = market::listing(&db, &market::SKILL, &slug)?
+        .ok_or_else(|| ApiError::not_found("技能不存在"))?;
+    claim.guard(
+        &tenant.0,
+        "只有发布者所在团队才能重新上架",
+        "该技能由管理员下架，不能自行恢复上架",
+    )?;
+    market::change_state(&db, &market::SKILL, &slug, market::Change::Restore, &tenant.actor()).map(Json)
 }
 
 /// GET /skills/{slug}/{version} (alias of the bundle route) — this is the URL
@@ -1001,369 +335,15 @@ pub async fn fetch_bundle(
     Path((slug, version)): Path<(String, String)>,
 ) -> ApiResult<Json<Value>> {
     let db = app.db();
-    let (owner, visibility, latest, takedown_at, withdrawn_at): (
-        String,
-        String,
-        Option<String>,
-        Option<i64>,
-        Option<i64>,
-    ) = db
-        .query_row(
-            "SELECT owner_tenant, visibility, latest_version, takedown_at, withdrawn_at
-             FROM skills WHERE slug = ?1",
-            params![slug],
-            |row| {
-                Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get(4)?,
-                ))
-            },
-        )
-        .map_err(|_| ApiError::new(StatusCode::GONE, "gone", "技能不存在"))?;
-
-    if takedown_at.is_some() {
-        debug!(
-            tenant = %tenant.0,
-            slug = %slug,
-            "bundle fetch: taken down"
-        );
-        return Err(ApiError::new(
-            StatusCode::GONE,
-            "taken_down",
-            "该技能已被管理员下架，无法再下载",
-        ));
-    }
-    let is_owner = owner == tenant.0;
-    if withdrawn_at.is_some() && !is_owner {
-        debug!(
-            tenant = %tenant.0,
-            slug = %slug,
-            "bundle fetch: withdrawn"
-        );
-        return Err(ApiError::new(
-            StatusCode::GONE,
-            "withdrawn",
-            "发布者已撤回该技能",
-        ));
-    }
-    if visibility != "public" && !is_owner {
-        debug!(
-            tenant = %tenant.0,
-            slug = %slug,
-            visibility = %visibility,
-            "bundle fetch: private skill"
-        );
-        return Err(ApiError::forbidden("该技能仅对所属团队可见"));
-    }
-
-    let resolved = if version == "latest" {
-        latest.ok_or_else(|| ApiError::new(StatusCode::GONE, "gone", "还没有已发布的版本"))?
-    } else {
-        version
-    };
-
-    let (name, bundle_json): (String, String) = db
-        .query_row(
-            "SELECT s.name, v.bundle_json FROM skills s
-             JOIN skill_versions v ON v.slug = s.slug
-             WHERE s.slug = ?1 AND v.version = ?2",
-            params![slug, resolved],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .map_err(|_| ApiError::not_found("版本不存在"))?;
-
-    let files: BTreeMap<String, FileData> = serde_json::from_str(&bundle_json).map_err(|err| {
-        ApiError::new(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "corrupt_bundle",
-            format!("存储的包无法读取：{err}"),
-        )
-    })?;
-
-    if let Err(err) = db.execute(
-        "UPDATE skills SET download_count = download_count + 1 WHERE slug = ?1",
-        params![slug],
-    ) {
-        // A counter must never fail an install that already succeeded.
-        warn!(slug = %slug, error = %err, "download counter update failed");
-    }
-
-    debug!(
-        tenant = %tenant.0,
-        slug = %slug,
-        version = %resolved,
-        files = files.len(),
-        bytes = files.values().map(FileData::len).sum::<usize>(),
-        "bundle fetched"
-    );
+    let payload = market::bundle(&db, &market::SKILL, &app.cfg, &tenant.0, &slug, &version)?;
+    // A skill payload carries no description: the manifest is the contract.
     Ok(Json(json!({
-        "name": name,
-        "version": resolved,
-        "files": files,
-        "source_url": format!("{}/skills/{}/{}", app.cfg.public_url, slug, resolved),
+        "name": payload.name,
+        "version": payload.version,
+        "files": payload.files,
+        "source_url": payload.source_url,
     })))
 }
 
 // ------------------------------------------------------------------ helpers ---
 
-/// Publisher names are labels, not identities: anything unusable is dropped
-/// instead of failing the publish (ownership is the tenant header, always).
-pub(crate) fn clean_publisher_name(raw: Option<&str>) -> Option<String> {
-    let cleaned: String = raw?.chars().filter(|c| !c.is_control()).take(64).collect();
-    let cleaned = cleaned.trim().to_string();
-    if cleaned.is_empty() {
-        None
-    } else {
-        Some(cleaned)
-    }
-}
-
-fn db_ref(db: &rusqlite::Connection) -> &rusqlite::Connection {
-    db
-}
-
-/// Identifier a publish derives from a display name: `My Skill!` -> `my-skill`,
-/// `周报助手` -> `zhoubaozhushou`.
-///
-/// Han characters become plain (tone-less) pinyin, syllables joined, so a
-/// Chinese name still gets a stable lowercase-ASCII slug instead of forcing the
-/// page to invent one. Everything else that is not `[a-z0-9]` separates words,
-/// repeated separators collapse, and the result is capped at `MAX_SLUG_LEN`
-/// (truncated on a separator) so long names do not fail the publish.
-pub(crate) fn derive_slug(name: &str) -> Option<String> {
-    let mut slug = String::with_capacity(name.len());
-    for c in name.trim().chars() {
-        if c.is_ascii_alphanumeric() {
-            slug.push(c.to_ascii_lowercase());
-        } else if let Some(pinyin) = c.to_pinyin() {
-            slug.push_str(pinyin.plain());
-        } else if !slug.is_empty() && !slug.ends_with('-') {
-            slug.push('-');
-        }
-    }
-    let slug = slug.trim_matches('-');
-    let slug = if slug.len() > limits::MAX_SLUG_LEN {
-        slug[..limits::MAX_SLUG_LEN].trim_end_matches('-')
-    } else {
-        slug
-    };
-    if slug.is_empty() || !limits::valid_slug(slug) {
-        None
-    } else {
-        Some(slug.to_string())
-    }
-}
-
-/// Version precedence, in the part of semver that decides which version is
-/// `latest`: build metadata is ignored, a prerelease sorts *below* its own
-/// release (`1.0.0-beta < 1.0.0`), and a missing segment counts as zero
-/// (`1.0 == 1.0.0`).
-///
-/// The market does not require semver — `limits::valid_version` accepts any
-/// version a host might have produced — so a non-numeric segment falls back to
-/// a lexical compare instead of being rejected.
-pub(crate) fn compare_versions(a: &str, b: &str) -> std::cmp::Ordering {
-    let (a_core, a_pre) = split_version(a);
-    let (b_core, b_pre) = split_version(b);
-    cmp_core(a_core, b_core).then_with(|| cmp_prerelease(a_pre, b_pre))
-}
-
-/// `major.minor.patch[-pre][+build]` → (`major.minor.patch`, `pre`). Both build
-/// metadata and everything after the first `-` are dropped from the core; a
-/// hyphen inside an identifier (`1.0.0-alpha-1`) stays part of the prerelease.
-fn split_version(v: &str) -> (&str, &str) {
-    let without_build = v.split('+').next().unwrap_or(v);
-    match without_build.split_once('-') {
-        Some((core, pre)) => (core, pre),
-        None => (without_build, ""),
-    }
-}
-
-fn cmp_core(a: &str, b: &str) -> std::cmp::Ordering {
-    let (mut ai, mut bi) = (a.split('.'), b.split('.'));
-    loop {
-        // A missing segment is a zero, so trailing `.0`s never decide.
-        match (ai.next(), bi.next()) {
-            (None, None) => return std::cmp::Ordering::Equal,
-            (x, y) => {
-                let ord = cmp_segment(x.unwrap_or("0"), y.unwrap_or("0"));
-                if ord.is_ne() {
-                    return ord;
-                }
-            }
-        }
-    }
-}
-
-fn cmp_prerelease(a: &str, b: &str) -> std::cmp::Ordering {
-    use std::cmp::Ordering::*;
-    match (a.is_empty(), b.is_empty()) {
-        (true, true) => return Equal,
-        // A release outranks every prerelease of the same core version.
-        (true, false) => return Greater,
-        (false, true) => return Less,
-        (false, false) => {}
-    }
-    let (mut ai, mut bi) = (a.split('.'), b.split('.'));
-    loop {
-        match (ai.next(), bi.next()) {
-            (None, None) => return Equal,
-            // `alpha` < `alpha.1`: the longer prerelease wins a shared prefix.
-            (Some(_), None) => return Greater,
-            (None, Some(_)) => return Less,
-            (Some(x), Some(y)) => {
-                let ord = match (x.parse::<u64>(), y.parse::<u64>()) {
-                    (Ok(nx), Ok(ny)) => nx.cmp(&ny),
-                    // Numeric identifiers rank below alphanumeric ones.
-                    (Ok(_), Err(_)) => Less,
-                    (Err(_), Ok(_)) => Greater,
-                    (Err(_), Err(_)) => x.cmp(y),
-                };
-                if ord.is_ne() {
-                    return ord;
-                }
-            }
-        }
-    }
-}
-
-fn cmp_segment(x: &str, y: &str) -> std::cmp::Ordering {
-    match (x.parse::<u64>(), y.parse::<u64>()) {
-        (Ok(nx), Ok(ny)) => nx.cmp(&ny),
-        _ => x.cmp(y),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Pins the ordering that decides which version becomes `latest`. Every
-    /// row is (left, right, expected) — a refactor of `compare_versions` that
-    /// changes any of these changes what the market serves.
-    #[test]
-    fn compares_versions_sanely() {
-        use std::cmp::Ordering::*;
-        let cases = [
-            // core ordering is numeric, not lexical
-            ("1.0.10", "1.0.9", Greater),
-            ("1.0.0", "1.0.0", Equal),
-            ("2.0.0", "10.0.0", Less),
-            ("1.1.0", "1.0.99", Greater),
-            ("1.0.1", "1.0", Greater),
-            // a missing segment is a zero, never a lexical empty string
-            ("1.0", "1.0.0", Equal),
-            ("1", "1.0.0", Equal),
-            ("1.0", "1.0.1", Less),
-            // a prerelease sorts below its own release
-            ("1.0.0", "1.0.0-beta", Greater),
-            ("1.0.0-beta", "1.0.0", Less),
-            ("2.0.0-rc.1", "2.0.0", Less),
-            ("1.0.1-beta", "1.0.1", Less),
-            ("1.0.1-beta", "1.0.0", Greater),
-            // prerelease identifiers, in semver precedence order
-            ("1.0.0-alpha", "1.0.0-alpha.1", Less),
-            ("1.0.0-alpha.1", "1.0.0-alpha.beta", Less),
-            ("1.0.0-alpha.beta", "1.0.0-beta", Less),
-            ("1.0.0-beta", "1.0.0-beta.2", Less),
-            ("1.0.0-beta.2", "1.0.0-beta.11", Less),
-            ("1.0.0-beta.11", "1.0.0-rc.1", Less),
-            ("1.0.0-rc.1", "1.0.0-rc.2", Less),
-            ("1.0.0-0", "1.0.0", Less),
-            // build metadata is not part of precedence at all
-            ("1.0.0+build.1", "1.0.0", Equal),
-            ("1.0.0+build.2", "1.0.0+build.1", Equal),
-            ("1.0.0-rc.1+build", "1.0.0-rc.1", Equal),
-        ];
-        for (left, right, expected) in cases {
-            assert_eq!(compare_versions(left, right), expected, "{left} vs {right}");
-            assert_eq!(
-                compare_versions(right, left),
-                expected.reverse(),
-                "{right} vs {left} (antisymmetry)"
-            );
-        }
-    }
-
-    /// The comparison is used as `is_gt()` on the stored `latest_version`, so
-    /// it only needs to be a consistent total order over a realistic release
-    /// train — sorted once by hand, then re-checked pairwise.
-    #[test]
-    fn version_order_is_a_consistent_total_order() {
-        use std::cmp::Ordering::*;
-        let train = [
-            "0.1.0",
-            "1.0.0-alpha",
-            "1.0.0-alpha.1",
-            "1.0.0-beta",
-            "1.0.0-rc.1",
-            "1.0.0",
-            "1.0.1",
-            "1.0.2-rc.1",
-            "1.0.2",
-            "1.2.0",
-            "1.10.0",
-            "2.0.0",
-        ];
-        for (i, lower) in train.iter().enumerate() {
-            for higher in &train[i + 1..] {
-                assert_eq!(compare_versions(lower, higher), Less, "{lower} < {higher}");
-                assert_eq!(compare_versions(higher, lower), Greater, "{higher} > {lower}");
-            }
-            assert_eq!(compare_versions(lower, lower), Equal, "{lower} == {lower}");
-        }
-    }
-
-    #[test]
-    fn suggests_the_next_patch_version() {
-        assert_eq!(suggest_next_version("1.0.0").as_deref(), Some("1.0.1"));
-        assert_eq!(suggest_next_version("2.2.2").as_deref(), Some("2.2.3"));
-        assert_eq!(suggest_next_version("1.0.9").as_deref(), Some("1.0.10"));
-        // Anything non-semver leaves the field alone.
-        for odd in ["v1", "1.0", "1.0.0.post1", "latest", ""] {
-            assert_eq!(suggest_next_version(odd), None, "{odd}");
-        }
-    }
-
-    #[test]
-    fn derives_slugs() {
-        assert_eq!(derive_slug("My Skill!"), Some("my-skill".to_string()));
-        assert_eq!(derive_slug("  My   Skill  "), Some("my-skill".into()));
-        assert_eq!(derive_slug("v1.2 tool"), Some("v1-2-tool".into()));
-        // Chinese names transliterate to plain pinyin instead of failing.
-        assert_eq!(derive_slug("技能"), Some("jineng".into()));
-        assert_eq!(derive_slug("周报助手"), Some("zhoubaozhushou".into()));
-        assert_eq!(
-            derive_slug("周报助手 Pro"),
-            Some("zhoubaozhushou-pro".into())
-        );
-        assert_eq!(derive_slug("技能（测试）"), Some("jineng-ceshi".into()));
-        // Nothing usable -> None (publish then demands an explicit slug).
-        assert_eq!(derive_slug(""), None);
-        assert_eq!(derive_slug("  "), None);
-        assert_eq!(derive_slug("!!!"), None);
-        // Long names are truncated on a separator, not rejected.
-        let long = derive_slug(&"技能".repeat(40)).unwrap();
-        assert!(limits::valid_slug(&long), "{long}");
-        assert_eq!(long.len(), 64);
-    }
-
-    #[test]
-    fn cleans_publisher_names_but_never_invents_one() {
-        assert_eq!(clean_publisher_name(Some(" admin ")), Some("admin".into()));
-        assert_eq!(clean_publisher_name(Some("张三")), Some("张三".into()));
-        assert_eq!(
-            clean_publisher_name(Some("\u{0}admin\n")),
-            Some("admin".into())
-        );
-        assert_eq!(clean_publisher_name(Some("   ")), None);
-        assert_eq!(clean_publisher_name(None), None);
-        assert_eq!(
-            clean_publisher_name(Some(&"x".repeat(200))).unwrap().len(),
-            64
-        );
-    }
-}

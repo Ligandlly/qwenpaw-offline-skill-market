@@ -1,6 +1,7 @@
 //! Runtime configuration. Every knob is an environment variable (PLAN: 限额只用 env，改需重启）。
 
 use std::path::PathBuf;
+use std::time::Duration;
 
 #[derive(Clone, Debug)]
 pub struct Config {
@@ -10,6 +11,9 @@ pub struct Config {
     pub admin_user: String,
     pub admin_password: String,
     pub log_level: String,
+    /// Hard deadline for one request, so a stalled handler cannot pin a
+    /// connection (and a worker thread) forever.
+    pub request_timeout: Duration,
     pub limits: Limits,
 }
 
@@ -44,6 +48,9 @@ impl Config {
             admin_user: std::env::var("ADMIN_USER").unwrap_or_else(|_| "admin".into()),
             admin_password: std::env::var("ADMIN_PASSWORD").unwrap_or_default(),
             log_level: std::env::var("MARKET_LOG").unwrap_or_else(|_| "info".into()),
+            request_timeout: Duration::from_millis(
+                num("MARKET_REQUEST_TIMEOUT_MS", 30_000).max(1) as u64,
+            ),
             limits: Limits::from_env(),
         }
     }

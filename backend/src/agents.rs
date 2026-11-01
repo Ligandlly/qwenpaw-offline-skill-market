@@ -10,18 +10,18 @@
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::Json;
-use rusqlite::{params, Row};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
-use crate::api::{clean_publisher_name, compare_versions, derive_slug, ApiError, ApiResult};
+use crate::slug::clean_publisher_name;
+use crate::dto::{default_visibility, fifty, ListQuery, LookupQuery};
+use crate::error::{ApiError, ApiResult};
 use crate::auth::{Admin, TenantId};
-use crate::db::{audit_kind, now};
 use crate::limits::{self, FileData, Reject};
+use crate::market;
 use crate::state::Shared;
-use sha2::{Digest, Sha256};
 
 pub const AGENT_MANIFEST: &str = "manifest.json";
 
@@ -283,208 +283,107 @@ fn valid_skill_name(name: &str) -> bool {
         && !name.chars().any(|c| c.is_control())
 }
 
-/// Slug for an agent whose display name has no ASCII slug form (e.g. emoji).
-/// Stable across versions so republishing reuses the same market entry.
-fn agent_slug(name: &str) -> String {
-    if let Some(slug) = derive_slug(name) {
-        return slug;
-    }
-    let digest = Sha256::digest(name.trim().as_bytes());
-    let suffix: String = digest
-        .iter()
-        .take(6)
-        .map(|byte| format!("{byte:02x}"))
-        .collect();
-    format!("agent-{suffix}")
-}
-
-/// Slug this tenant already published under the same display name, if any.
-///
-/// Chinese names used to derive `agent-<sha256>` and now derive pinyin, so
-/// without this a republish after the upgrade would create a *second* entry for
-/// an agent that is already on the market. Same tenant + same name only, so it
-/// cannot reach into someone else's listing.
-fn existing_agent_slug(app: &Shared, tenant: &str, name: &str) -> Option<String> {
-    let db = app.db();
-    db.query_row(
-        "SELECT slug FROM agents WHERE owner_tenant = ?1 AND name = ?2
-         ORDER BY created_at LIMIT 1",
-        params![tenant, name.trim()],
-        |row| row.get(0),
-    )
-    .ok()
-}
-
 // ---------------------------------------------------------------- listings ---
-
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct AgentRow {
-    pub slug: String,
-    pub name: String,
-    pub description: String,
-    pub owner_tenant: String,
-    pub owner_name: Option<String>,
-    pub visibility: String,
-    pub latest_version: Option<String>,
-    pub created_at: i64,
-    /// Newest version upload time, falling back to the entry's `created_at`.
-    pub updated_at: i64,
-    pub download_count: i64,
-    pub withdrawn_at: Option<i64>,
-    pub takedown_at: Option<i64>,
-    pub takedown_reason: Option<String>,
-    pub versions: i64,
-    pub size_bytes: i64,
-    pub skill_count: i64,
-    pub bundle_url: Option<String>,
-}
-
-fn row_to_agent(row: &Row<'_>, public_url: &str) -> rusqlite::Result<AgentRow> {
-    let slug: String = row.get("slug")?;
-    let latest: Option<String> = row.get("latest_version")?;
-    let bundle_url = latest
-        .as_ref()
-        .map(|version| format!("{public_url}/api/v1/agents/{slug}/{version}/bundle"));
-    Ok(AgentRow {
-        slug,
-        name: row.get("name")?,
-        description: row.get("description")?,
-        owner_tenant: row.get("owner_tenant")?,
-        owner_name: row.get("owner_name")?,
-        visibility: row.get("visibility")?,
-        latest_version: latest,
-        created_at: row.get("created_at")?,
-        updated_at: row.get("updated_at")?,
-        download_count: row.get("download_count")?,
-        withdrawn_at: row.get("withdrawn_at")?,
-        takedown_at: row.get("takedown_at")?,
-        takedown_reason: row.get("takedown_reason")?,
-        versions: row.get("versions")?,
-        size_bytes: row.get("size_bytes")?,
-        skill_count: row.get("skill_count")?,
-        bundle_url,
-    })
-}
-
-const AGENT_SELECT: &str = r#"
-SELECT a.slug, a.name, a.description, a.owner_tenant, t.display_name AS owner_name,
-       a.visibility, a.latest_version, a.created_at, a.withdrawn_at,
-       a.takedown_at, a.takedown_reason, a.download_count,
-       COALESCE((SELECT MAX(v.created_at) FROM agent_versions v WHERE v.slug = a.slug),
-                a.created_at) AS updated_at,
-       COALESCE((SELECT COUNT(*) FROM agent_versions v WHERE v.slug = a.slug), 0) AS versions,
-       COALESCE((SELECT SUM(size_bytes) FROM agent_versions v WHERE v.slug = a.slug), 0) AS size_bytes,
-       COALESCE((SELECT skill_count FROM agent_versions v
-                  WHERE v.slug = a.slug AND v.version = a.latest_version), 0) AS skill_count
-FROM agents a
-LEFT JOIN tenants t ON t.id = a.owner_tenant
-"#;
-
-#[derive(Debug, Deserialize)]
-pub struct ListQuery {
-    #[serde(default)]
-    pub q: String,
-    #[serde(default = "one")]
-    pub page: i64,
-    #[serde(default = "twenty")]
-    pub limit: i64,
-    /// `created` (default) | `downloads` | `updated`.
-    #[serde(default)]
-    pub sort: String,
-}
-
-/// Whitelisted ORDER BY; mirrors `api::skill_order` for agents.
-fn agent_order(sort: &str) -> &'static str {
-    match crate::api::normalize_sort(sort) {
-        "downloads" => "a.download_count DESC, a.created_at DESC",
-        "updated" => "updated_at DESC, a.created_at DESC",
-        _ => "a.created_at DESC",
-    }
-}
-
-fn one() -> i64 {
-    1
-}
-fn twenty() -> i64 {
-    20
-}
 
 /// GET /api/v1/agents
 pub async fn list_agents(
     State(app): State<Shared>,
     tenant: TenantId,
-    Query(query): Query<ListQuery>,
+    Query(q): Query<ListQuery>,
 ) -> ApiResult<Json<Value>> {
-    let limit = query.limit.clamp(1, 50);
-    let offset = (query.page.max(1) - 1) * limit;
-    let pattern = format!("%{}%", query.q.trim());
-    let order = agent_order(&query.sort);
-
     let db = app.db();
-    db.execute(
-        "INSERT INTO tenants (id, first_seen, last_seen) VALUES (?1, ?2, ?2)
-         ON CONFLICT(id) DO UPDATE SET last_seen = excluded.last_seen",
-        params![tenant.0, now()],
-    )
-    .map_err(ApiError::db)?;
-
-    let total: i64 = db
-        .query_row(
-            "SELECT COUNT(*) FROM agents a
-             WHERE a.takedown_at IS NULL AND a.withdrawn_at IS NULL
-               AND (a.visibility = 'public' OR a.owner_tenant = ?1)
-               AND (a.slug LIKE ?2 OR a.name LIKE ?2)",
-            params![tenant.0, pattern],
-            |row| row.get(0),
-        )
-        .map_err(ApiError::db)?;
-
-    let sql = format!(
-        "{AGENT_SELECT}
-         WHERE a.takedown_at IS NULL AND a.withdrawn_at IS NULL
-           AND (a.visibility = 'public' OR a.owner_tenant = ?1)
-           AND (a.slug LIKE ?2 OR a.name LIKE ?2)
-         ORDER BY {order}
-         LIMIT ?3 OFFSET ?4"
-    );
-    let mut stmt = db.prepare(&sql).map_err(ApiError::db)?;
-    let rows = stmt
-        .query_map(params![tenant.0, pattern, limit, offset], |row| {
-            row_to_agent(row, &app.cfg.public_url)
-        })
-        .map_err(ApiError::db)?
-        .collect::<rusqlite::Result<Vec<_>>>()
-        .map_err(ApiError::db)?;
-
-    debug!(
-        tenant = %tenant.0,
-        q = %query.q,
-        items = rows.len(),
-        "agent listing"
-    );
-    Ok(Json(json!({
-        "page": query.page.max(1),
-        "limit": limit,
-        "total": total,
-        "sort": crate::api::normalize_sort(&query.sort),
-        "items": rows
-    })))
+    market::list_page(&db, &market::AGENT, &tenant.0, &q, &app.cfg.public_url).map(Json)
 }
 
 /// GET /api/v1/agents/mine
 pub async fn list_mine(State(app): State<Shared>, tenant: TenantId) -> ApiResult<Json<Value>> {
     let db = app.db();
-    let sql = format!("{AGENT_SELECT} WHERE a.owner_tenant = ?1 ORDER BY a.created_at DESC");
-    let mut stmt = db.prepare(&sql).map_err(ApiError::db)?;
-    let rows = stmt
-        .query_map(params![tenant.0], |row| {
-            row_to_agent(row, &app.cfg.public_url)
-        })
-        .map_err(ApiError::db)?
-        .collect::<rusqlite::Result<Vec<_>>>()
-        .map_err(ApiError::db)?;
-    debug!(tenant = %tenant.0, items = rows.len(), "own agents");
-    Ok(Json(json!({ "items": rows })))
+    market::list_owned(&db, &market::AGENT, &tenant.0, &app.cfg.public_url).map(Json)
+}
+
+/// GET /api/v1/agents/lookup?names=a,b — display name -> market slug + state.
+pub async fn lookup_agents(
+    State(app): State<Shared>,
+    tenant: TenantId,
+    Query(query): Query<LookupQuery>,
+) -> ApiResult<Json<Value>> {
+    let db = app.db();
+    market::lookup(&db, &market::AGENT, &tenant.0, &query.names, &app.cfg.public_url).map(Json)
+}
+
+/// POST /api/v1/agents/validate — dry run of a publish, nothing is written.
+///
+/// The agent plane takes its name from the bundle's own manifest, so the gate
+/// runs first: without a readable manifest there is no name to derive a slug
+/// from, and "your manifest is broken" is the only useful answer.
+pub async fn validate(
+    State(app): State<Shared>,
+    tenant: TenantId,
+    Json(body): Json<PublishRequest>,
+) -> ApiResult<Json<Value>> {
+    let mut problems: Vec<market::Problem> = Vec::new();
+    market::check_fields(&body.version, &body.visibility, &mut problems);
+
+    let (name, manifest) = match check_agent_bundle(&body.files) {
+        Ok(checked) => {
+            let manifest = checked.manifest;
+            let preview = json!({
+                "name": manifest.name.trim(),
+                "description": manifest.description.trim(),
+                "language": manifest.language,
+                "skills": manifest.skills,
+            });
+            (manifest.name.clone(), Some(preview))
+        }
+        Err(reject) => {
+            problems.push(reject.into());
+            (String::new(), None)
+        }
+    };
+
+    let slug = if name.is_empty() {
+        None
+    } else {
+        market::resolve_slug(
+            &market::AGENT,
+            &app,
+            &tenant.0,
+            &name,
+            body.slug.as_deref(),
+            &mut problems,
+        )
+    };
+
+    let (existing, next_version) = match slug.as_deref().filter(|slug| limits::valid_slug(slug)) {
+        Some(slug) => {
+            let db = app.db();
+            market::inspect(&db, &market::AGENT, &tenant.0, slug, &body.version, &mut problems)?
+        }
+        None => (None, None),
+    };
+
+    debug!(
+        tenant = %tenant.0,
+        slug = slug.as_deref().unwrap_or("-"),
+        files = body.files.len(),
+        problems = problems.len(),
+        "agent validate"
+    );
+    Ok(Json(
+        market::Answer {
+            cfg: &app.cfg,
+            name,
+            version: body.version.clone(),
+            visibility: body.visibility.clone(),
+            slug,
+            files: &body.files,
+            manifest,
+            existing,
+            next_version,
+            problems,
+        }
+        .to_json(),
+    ))
 }
 
 /// GET /api/v1/agents/{slug}/status
@@ -494,38 +393,7 @@ pub async fn agent_status(
     Path(slug): Path<String>,
 ) -> ApiResult<Json<Value>> {
     let db = app.db();
-    let mut stmt = db
-        .prepare(
-            "SELECT slug, name, owner_tenant, visibility, latest_version,
-                    withdrawn_at, takedown_at, takedown_reason
-             FROM agents WHERE slug = ?1",
-        )
-        .map_err(ApiError::db)?;
-    let mut rows = stmt.query(params![slug]).map_err(ApiError::db)?;
-    let Some(row) = rows.next().map_err(ApiError::db)? else {
-        return Err(ApiError::not_found("智能体不存在"));
-    };
-    let owner: String = row.get("owner_tenant").map_err(ApiError::db)?;
-    let visibility: String = row.get("visibility").map_err(ApiError::db)?;
-    if owner != tenant.0 && visibility != "public" {
-        return Err(ApiError::not_found("智能体不存在"));
-    }
-    let withdrawn_at: Option<i64> = row.get("withdrawn_at").map_err(ApiError::db)?;
-    let takedown_at: Option<i64> = row.get("takedown_at").map_err(ApiError::db)?;
-    let state = if takedown_at.is_some() {
-        "taken_down"
-    } else if withdrawn_at.is_some() {
-        "withdrawn"
-    } else {
-        "active"
-    };
-    Ok(Json(json!({
-        "slug": row.get::<_, String>("slug").map_err(ApiError::db)?,
-        "name": row.get::<_, String>("name").map_err(ApiError::db)?,
-        "latest_version": row.get::<_, Option<String>>("latest_version").map_err(ApiError::db)?,
-        "state": state,
-        "takedown_reason": row.get::<_, Option<String>>("takedown_reason").map_err(ApiError::db)?,
-    })))
+    market::status(&db, &market::AGENT, &tenant.0, &slug).map(Json)
 }
 
 // ---------------------------------------------------------------- publish ---
@@ -542,30 +410,13 @@ pub struct PublishRequest {
     pub files: BTreeMap<String, FileData>,
 }
 
-fn default_visibility() -> String {
-    "public".to_string()
-}
-
 /// POST /api/v1/agents — publish an immutable agent version.
 pub async fn publish(
     State(app): State<Shared>,
     tenant: TenantId,
     Json(body): Json<PublishRequest>,
 ) -> ApiResult<(StatusCode, Json<Value>)> {
-    if !matches!(body.visibility.as_str(), "public" | "tenant") {
-        return Err(ApiError::new(
-            StatusCode::BAD_REQUEST,
-            "invalid_visibility",
-            "可见范围只能是 public 或 tenant",
-        ));
-    }
-    if !limits::valid_version(&body.version) {
-        return Err(ApiError::new(
-            StatusCode::BAD_REQUEST,
-            "invalid_version",
-            "版本号需为 1-32 位，只能包含 0-9 A-Z a-z . + -，且以字母或数字开头",
-        ));
-    }
+    market::require_fields(&body.version, &body.visibility)?;
 
     let checked = match check_agent_bundle(&body.files) {
         Ok(checked) => checked,
@@ -581,166 +432,82 @@ pub async fn publish(
         }
     };
 
-    let slug = match body
-        .slug
-        .as_deref()
-        .map(str::trim)
-        .filter(|slug| !slug.is_empty())
-    {
-        Some(slug) => slug.to_string(),
-        None => existing_agent_slug(&app, &tenant.0, &checked.manifest.name)
-            .unwrap_or_else(|| agent_slug(&checked.manifest.name)),
-    };
-    if !limits::valid_slug(&slug) {
-        return Err(ApiError::new(
-            StatusCode::BAD_REQUEST,
-            "invalid_slug",
-            "标识符需为 1-64 位，只能包含小写字母、数字和 -，且以字母或数字开头",
-        ));
-    }
-
     let publisher = clean_publisher_name(body.publisher_name.as_deref());
     let name = checked.manifest.name.trim().to_string();
     let description = checked.manifest.description.trim().to_string();
+    // The name lives in the bundle, so the gate runs before the slug can be
+    // derived from it.
+    let slug = market::required_slug(
+        &market::AGENT,
+        &app,
+        &tenant.0,
+        &name,
+        body.slug.as_deref(),
+    )?;
 
     let db = app.db();
     let actor = tenant.actor();
-    db.execute(
-        "INSERT INTO tenants (id, first_seen, last_seen, display_name) VALUES (?1, ?2, ?2, ?3)
-         ON CONFLICT(id) DO UPDATE SET last_seen = excluded.last_seen,
-             display_name = COALESCE(excluded.display_name, tenants.display_name)",
-        params![tenant.0, now(), publisher],
-    )
-    .map_err(ApiError::db)?;
+    market::record_tenant(&db, &tenant.0, publisher.as_deref())?;
 
-    let existing: Option<(String, Option<i64>)> = db
-        .query_row(
-            "SELECT owner_tenant, takedown_at FROM agents WHERE slug = ?1",
-            params![slug],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .ok();
-    if let Some((owner, takedown_at)) = &existing {
-        if owner != &tenant.0 {
-            warn!(
-                tenant = %tenant.0,
-                slug = %slug,
-                owner = %owner,
-                "agent publish rejected: slug belongs to another tenant"
-            );
-            return Err(ApiError::forbidden(format!(
-                "标识符 '{slug}' 已被其他团队占用"
-            )));
-        }
-        if takedown_at.is_some() {
-            return Err(ApiError::conflict(
-                "taken_down",
+    let previous = match market::listing(&db, &market::AGENT, &slug)? {
+        Some(claim) => {
+            claim.guard(
+                &tenant.0,
+                &format!("标识符 '{slug}' 已被其他团队占用"),
                 "该智能体已被管理员下架，不能再发布",
-            ));
+            )?;
+            claim.latest_version
         }
-    }
-
-    let tx = db.unchecked_transaction().map_err(ApiError::db)?;
-    tx.execute(
-        "INSERT INTO agents (slug, name, description, owner_tenant, visibility, latest_version, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-         ON CONFLICT(slug) DO UPDATE SET name = excluded.name, visibility = excluded.visibility",
-        params![
-            slug,
-            name,
-            description,
-            tenant.0,
-            body.visibility,
-            body.version,
-            now()
-        ],
-    )
-    .map_err(ApiError::db)?;
-
-    let inserted = tx.execute(
-        "INSERT OR IGNORE INTO agent_versions
-           (slug, version, sha256, size_bytes, file_count, skill_count, bundle_json, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-        params![
-            slug,
-            body.version,
-            checked.sha256,
-            checked.size_bytes as i64,
-            checked.file_count as i64,
-            checked.skill_count as i64,
-            serde_json::to_string(&checked.files).unwrap_or_default(),
-            now()
-        ],
-    );
-    let inserted = match inserted {
-        Ok(count) => count,
-        Err(err) => return Err(ApiError::db(err)),
+        None => None,
     };
-    if inserted == 0 {
-        warn!(
-            tenant = %tenant.0,
-            slug = %slug,
-            version = %body.version,
-            "agent publish rejected: version already exists"
-        );
-        return Err(ApiError::conflict(
-            "version_exists",
-            format!(
-                "版本 {} 已存在且不可修改，请不要重复发布同一个版本号",
-                body.version
-            ),
-        ));
-    }
 
-    let current: Option<String> = tx
-        .query_row(
-            "SELECT latest_version FROM agents WHERE slug = ?1",
-            params![slug],
-            |row| row.get(0),
+    // Serialise before opening the transaction: a bundle that cannot be
+    // written must abort the publish, not leave a row whose contents are an
+    // empty string (versions are immutable, so that row would be permanent).
+    let bundle_json = serde_json::to_string(&checked.files).map_err(|err| {
+        error!(error = %err, "bundle serialization failed");
+        ApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal",
+            "智能体内容无法序列化",
         )
-        .map_err(ApiError::db)?;
-    let advance = current
-        .as_deref()
-        .map(|cur| compare_versions(&body.version, cur).is_gt())
-        .unwrap_or(true);
-    if advance {
-        tx.execute(
-            "UPDATE agents SET latest_version = ?2, name = ?3, description = ?4 WHERE slug = ?1",
-            params![slug, body.version, name, description],
-        )
-        .map_err(ApiError::db)?;
-    }
-    tx.execute(
-        "UPDATE agents SET withdrawn_at = NULL, withdrawn_by = NULL
-         WHERE slug = ?1 AND withdrawn_at IS NOT NULL",
-        params![slug],
-    )
-    .map_err(ApiError::db)?;
+    })?;
 
-    audit_kind(
-        &tx,
-        "agent",
+    let detail = format!(
+        "{} files, {} bytes, {} skills, visibility={}",
+        checked.file_count, checked.size_bytes, checked.skill_count, body.visibility
+    );
+    let advances = market::store(
+        &db,
+        &market::AGENT,
+        market::Publish {
+            slug: &slug,
+            tenant: &tenant.0,
+            version: &body.version,
+            visibility: &body.visibility,
+            name: &name,
+            description: Some(&description),
+            file_count: checked.file_count,
+            skill_count: Some(checked.skill_count as i64),
+            size_bytes: checked.size_bytes,
+            sha256: &checked.sha256,
+            bundle_json,
+            previous,
+        },
+        &detail,
         &actor,
-        "publish",
-        Some(&slug),
-        Some(&body.version),
-        Some(&format!(
-            "{} files, {} bytes, {} skills, visibility={}",
-            checked.file_count, checked.size_bytes, checked.skill_count, body.visibility
-        )),
-    )
-    .map_err(ApiError::db)?;
-    tx.commit().map_err(ApiError::db)?;
+    )?;
 
     info!(
         tenant = %tenant.0,
         slug = %slug,
         version = %body.version,
         visibility = %body.visibility,
+        publisher = publisher.as_deref().unwrap_or("-"),
         files = checked.file_count,
         bytes = checked.size_bytes,
         skills = checked.skill_count,
-        latest = advance,
+        latest = advances.advanced,
         "agent published"
     );
     Ok((
@@ -752,11 +519,8 @@ pub async fn publish(
             "size_bytes": checked.size_bytes,
             "file_count": checked.file_count,
             "skill_count": checked.skill_count,
-            "latest_version": if advance { json!(body.version) } else { json!(current) },
-            "bundle_url": format!(
-                "{}/api/v1/agents/{}/{}/bundle",
-                app.cfg.public_url, slug, body.version
-            ),
+            "latest_version": advances.latest_version,
+            "bundle_url": (market::AGENT.bundle_url)(&app.cfg.public_url, &slug, &body.version),
         })),
     ))
 }
@@ -775,38 +539,17 @@ pub async fn withdraw(
     Path(slug): Path<String>,
     body: Option<Json<WithdrawRequest>>,
 ) -> ApiResult<Json<Value>> {
-    let reason = body.and_then(|Json(body)| body.reason);
+    let reason = body.and_then(|Json(b)| b.reason);
     let db = app.db();
-    let (owner, takedown_at): (String, Option<i64>) = db
-        .query_row(
-            "SELECT owner_tenant, takedown_at FROM agents WHERE slug = ?1",
-            params![slug],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .map_err(|_| ApiError::not_found("智能体不存在"))?;
-    if owner != tenant.0 {
-        return Err(ApiError::forbidden("只有发布者所在团队才能下架"));
-    }
-    if takedown_at.is_some() {
-        return Err(ApiError::conflict("taken_down", "该条目已被管理员下架"));
-    }
-    db.execute(
-        "UPDATE agents SET withdrawn_at = ?2, withdrawn_by = ?3 WHERE slug = ?1",
-        params![slug, now(), tenant.0],
-    )
-    .map_err(ApiError::db)?;
-    audit_kind(
-        &db,
-        "agent",
-        &tenant.actor(),
-        "withdraw",
-        Some(&slug),
-        None,
-        reason.as_deref(),
-    )
-    .map_err(ApiError::db)?;
-    info!(tenant = %tenant.0, slug = %slug, "agent withdrawn");
-    Ok(Json(json!({ "slug": slug, "state": "withdrawn" })))
+    let claim = market::listing(&db, &market::AGENT, &slug)?
+        .ok_or_else(|| ApiError::not_found("智能体不存在"))?;
+    claim.guard(
+        &tenant.0,
+        "只有发布者所在团队才能下架",
+        "该条目已被管理员下架",
+    )?;
+    let change = market::Change::Withdraw { reason };
+    market::change_state(&db, &market::AGENT, &slug, change, &tenant.actor()).map(Json)
 }
 
 pub async fn restore(
@@ -815,39 +558,14 @@ pub async fn restore(
     Path(slug): Path<String>,
 ) -> ApiResult<Json<Value>> {
     let db = app.db();
-    let (owner, takedown_at): (String, Option<i64>) = db
-        .query_row(
-            "SELECT owner_tenant, takedown_at FROM agents WHERE slug = ?1",
-            params![slug],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .map_err(|_| ApiError::not_found("智能体不存在"))?;
-    if owner != tenant.0 {
-        return Err(ApiError::forbidden("只有发布者所在团队才能重新上架"));
-    }
-    if takedown_at.is_some() {
-        return Err(ApiError::conflict(
-            "taken_down",
-            "该智能体由管理员下架，不能自行恢复上架",
-        ));
-    }
-    db.execute(
-        "UPDATE agents SET withdrawn_at = NULL, withdrawn_by = NULL WHERE slug = ?1",
-        params![slug],
-    )
-    .map_err(ApiError::db)?;
-    audit_kind(
-        &db,
-        "agent",
-        &tenant.actor(),
-        "restore",
-        Some(&slug),
-        None,
-        None,
-    )
-    .map_err(ApiError::db)?;
-    info!(tenant = %tenant.0, slug = %slug, "agent restored");
-    Ok(Json(json!({ "slug": slug, "state": "active" })))
+    let claim = market::listing(&db, &market::AGENT, &slug)?
+        .ok_or_else(|| ApiError::not_found("智能体不存在"))?;
+    claim.guard(
+        &tenant.0,
+        "只有发布者所在团队才能重新上架",
+        "该智能体由管理员下架，不能自行恢复上架",
+    )?;
+    market::change_state(&db, &market::AGENT, &slug, market::Change::Restore, &tenant.actor()).map(Json)
 }
 
 // ----------------------------------------------------------------- bundle ---
@@ -859,96 +577,13 @@ pub async fn fetch_bundle(
     Path((slug, version)): Path<(String, String)>,
 ) -> ApiResult<Json<Value>> {
     let db = app.db();
-    let (owner, visibility, latest, takedown_at, withdrawn_at): (
-        String,
-        String,
-        Option<String>,
-        Option<i64>,
-        Option<i64>,
-    ) = db
-        .query_row(
-            "SELECT owner_tenant, visibility, latest_version, takedown_at, withdrawn_at
-             FROM agents WHERE slug = ?1",
-            params![slug],
-            |row| {
-                Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get(4)?,
-                ))
-            },
-        )
-        .map_err(|_| ApiError::new(StatusCode::GONE, "gone", "智能体不存在"))?;
-
-    if takedown_at.is_some() {
-        return Err(ApiError::new(
-            StatusCode::GONE,
-            "taken_down",
-            "该智能体已被管理员下架，无法再下载",
-        ));
-    }
-    let is_owner = owner == tenant.0;
-    if withdrawn_at.is_some() && !is_owner {
-        return Err(ApiError::new(
-            StatusCode::GONE,
-            "withdrawn",
-            "发布者已撤回该智能体",
-        ));
-    }
-    if visibility != "public" && !is_owner {
-        return Err(ApiError::forbidden("该智能体仅对所属团队可见"));
-    }
-
-    let resolved = if version == "latest" {
-        latest.ok_or_else(|| ApiError::new(StatusCode::GONE, "gone", "还没有已发布的版本"))?
-    } else {
-        version
-    };
-
-    let (name, description, bundle_json): (String, String, String) = db
-        .query_row(
-            "SELECT a.name, a.description, v.bundle_json FROM agents a
-             JOIN agent_versions v ON v.slug = a.slug
-             WHERE a.slug = ?1 AND v.version = ?2",
-            params![slug, resolved],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-        )
-        .map_err(|_| ApiError::not_found("版本不存在"))?;
-
-    let files: BTreeMap<String, FileData> = serde_json::from_str(&bundle_json).map_err(|err| {
-        ApiError::new(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "corrupt_bundle",
-            format!("存储的智能体包无法读取：{err}"),
-        )
-    })?;
-
-    if let Err(err) = db.execute(
-        "UPDATE agents SET download_count = download_count + 1 WHERE slug = ?1",
-        params![slug],
-    ) {
-        // A counter must never fail an install that already succeeded.
-        warn!(slug = %slug, error = %err, "agent download counter update failed");
-    }
-
-    debug!(
-        tenant = %tenant.0,
-        slug = %slug,
-        version = %resolved,
-        files = files.len(),
-        "agent bundle fetched"
-    );
+    let payload = market::bundle(&db, &market::AGENT, &app.cfg, &tenant.0, &slug, &version)?;
     Ok(Json(json!({
-        "name": name,
-        "description": description,
-        "version": resolved,
-        "files": files,
-        "source_url": format!(
-            "{}/api/v1/agents/{}/{}/bundle",
-            app.cfg.public_url, slug, resolved
-        ),
+        "name": payload.name,
+        "description": payload.description,
+        "version": payload.version,
+        "files": payload.files,
+        "source_url": payload.source_url,
     })))
 }
 
@@ -962,35 +597,21 @@ pub struct AdminListQuery {
     pub limit: i64,
 }
 
-fn fifty() -> i64 {
-    50
-}
-
 /// GET /admin/api/agents
 pub async fn admin_list(
     State(app): State<Shared>,
     _admin: Admin,
     Query(query): Query<AdminListQuery>,
 ) -> Result<Json<Value>, ApiError> {
-    let pattern = format!("%{}%", query.q.trim());
-    let limit = query.limit.clamp(1, 200);
     let db = app.db();
-    let sql = format!(
-        "{AGENT_SELECT}
-         WHERE a.slug LIKE ?1 OR a.name LIKE ?1
-         ORDER BY a.created_at DESC
-         LIMIT ?2"
-    );
-    let mut stmt = db.prepare(&sql).map_err(ApiError::db)?;
-    let items = stmt
-        .query_map(params![pattern, limit], |row| {
-            row_to_agent(row, &app.cfg.public_url)
-        })
-        .map_err(ApiError::db)?
-        .collect::<rusqlite::Result<Vec<_>>>()
-        .map_err(ApiError::db)?;
-    debug!(items = items.len(), "admin agent listing");
-    Ok(Json(json!({ "items": items })))
+    market::list_admin(
+        &db,
+        &market::AGENT,
+        &query.q,
+        query.limit.clamp(1, 200),
+        &app.cfg.public_url,
+    )
+    .map(Json)
 }
 
 #[derive(Debug, Deserialize)]
@@ -1005,42 +626,13 @@ pub async fn admin_takedown(
     admin: Admin,
     Path(slug): Path<String>,
     body: Option<Json<TakedownRequest>>,
-) -> Result<Json<Value>, ApiError> {
+) -> ApiResult<Json<Value>> {
     let reason = body
-        .and_then(|Json(body)| body.reason)
-        .filter(|reason| !reason.trim().is_empty());
+        .and_then(|Json(b)| b.reason)
+        .filter(|r| !r.trim().is_empty());
     let db = app.db();
-    let changed = db
-        .execute(
-            "UPDATE agents SET takedown_at = ?2, takedown_by = ?3, takedown_reason = ?4
-             WHERE slug = ?1",
-            params![slug, now(), admin.0, reason],
-        )
-        .map_err(ApiError::db)?;
-    if changed == 0 {
-        return Err(ApiError::new(
-            StatusCode::NOT_FOUND,
-            "not_found",
-            "智能体不存在",
-        ));
-    }
-    audit_kind(
-        &db,
-        "agent",
-        &admin.actor(),
-        "takedown",
-        Some(&slug),
-        None,
-        reason.as_deref(),
-    )
-    .map_err(ApiError::db)?;
-    info!(
-        admin = %admin.0,
-        slug = %slug,
-        reason = reason.as_deref().unwrap_or("-"),
-        "agent taken down"
-    );
-    Ok(Json(json!({ "slug": slug, "state": "taken_down" })))
+    let change = market::Change::Takedown { reason };
+    market::change_state(&db, &market::AGENT, &slug, change, &admin.actor()).map(Json)
 }
 
 /// POST /admin/api/agents/{slug}/restore
@@ -1048,34 +640,9 @@ pub async fn admin_restore(
     State(app): State<Shared>,
     admin: Admin,
     Path(slug): Path<String>,
-) -> Result<Json<Value>, ApiError> {
+) -> ApiResult<Json<Value>> {
     let db = app.db();
-    let changed = db
-        .execute(
-            "UPDATE agents SET takedown_at = NULL, takedown_by = NULL, takedown_reason = NULL
-             WHERE slug = ?1",
-            params![slug],
-        )
-        .map_err(ApiError::db)?;
-    if changed == 0 {
-        return Err(ApiError::new(
-            StatusCode::NOT_FOUND,
-            "not_found",
-            "智能体不存在",
-        ));
-    }
-    audit_kind(
-        &db,
-        "agent",
-        &admin.actor(),
-        "admin_restore",
-        Some(&slug),
-        None,
-        None,
-    )
-    .map_err(ApiError::db)?;
-    info!(admin = %admin.0, slug = %slug, "agent takedown revoked");
-    Ok(Json(json!({ "slug": slug, "state": "active" })))
+    market::change_state(&db, &market::AGENT, &slug, market::Change::Lift, &admin.actor()).map(Json)
 }
 
 #[cfg(test)]

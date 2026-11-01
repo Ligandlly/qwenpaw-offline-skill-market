@@ -1,6 +1,5 @@
 //! Admin plane: separate login, own session cookie, full visibility.
 
-use argon2::password_hash::{rand_core::OsRng, SaltString};
 use axum::extract::{FromRequestParts, Path, Query, State};
 use axum::http::request::Parts;
 use axum::http::{header, HeaderValue, StatusCode};
@@ -11,9 +10,11 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use tracing::{debug, error, info, warn};
 
-use crate::api::{ApiError, SkillRow};
+use crate::dto::fifty;
+use crate::error::{ApiError, ApiResult};
 use crate::auth::{self, Admin};
-use crate::db::{audit, now};
+use crate::db::{audit_kind, now, AUDIT_ADMIN, AUDIT_AGENT, AUDIT_SKILL};
+use crate::market;
 use crate::state::Shared;
 
 /// Bootstrap the first admin from `ADMIN_USER` / `ADMIN_PASSWORD`.
@@ -95,11 +96,35 @@ pub struct LoginRequest {
     pub password: String,
 }
 
+/// Bounds the work an unauthenticated caller can ask for: Argon2 over a
+/// megabyte-long "password" is a cheap way to burn the server's CPU.
+const MAX_USERNAME_LEN: usize = 64;
+const MAX_PASSWORD_LEN: usize = 256;
+
 /// POST /admin/api/login
 pub async fn login(
     State(app): State<Shared>,
     Json(body): Json<LoginRequest>,
 ) -> Result<Response, ApiError> {
+    if body.username.len() > MAX_USERNAME_LEN || body.password.len() > MAX_PASSWORD_LEN {
+        return Err(ApiError::bad_request(
+            "invalid_credentials",
+            "用户名或密码过长",
+        ));
+    }
+
+    // Spent budget is checked before the database is touched, so a flood costs
+    // neither a hash nor an audit row.
+    let key = body.username.trim().to_lowercase();
+    if let Some(wait) = app.logins().blocked_for(&key) {
+        warn!(username = %body.username, wait, "admin login refused: too many failures");
+        return Err(ApiError::new(
+            StatusCode::TOO_MANY_REQUESTS,
+            "too_many_attempts",
+            format!("登录失败次数过多，请 {wait} 秒后再试"),
+        ));
+    }
+
     let hash: Option<String> = {
         let db = app.db();
         db.query_row(
@@ -114,28 +139,44 @@ pub async fn login(
         .map(|stored| auth::verify_password(&body.password, stored))
         .unwrap_or(false);
     if !ok {
-        // Do not reveal whether the username exists.
+        // Do not reveal whether the username exists. The limiter caps how many
+        // of these rows an anonymous caller can create.
+        let tripped = app.logins().record_failure(&key);
         let db = app.db();
-        let _ = audit(
+        let _ = audit_kind(
             &db,
+            AUDIT_ADMIN,
             "anonymous",
             "admin_login_failed",
             None,
             None,
             Some(&body.username),
         );
-        warn!(username = %body.username, "admin login failed");
+        if tripped {
+            let _ = audit_kind(
+                &db,
+                AUDIT_ADMIN,
+                "anonymous",
+                "admin_login_locked",
+                None,
+                None,
+                Some(&key),
+            );
+        }
+        warn!(username = %body.username, locked = tripped, "admin login failed");
         return Err(ApiError::new(
             StatusCode::UNAUTHORIZED,
             "invalid_credentials",
             "用户名或密码错误",
         ));
     }
+    app.logins().succeeded(&key);
     let token = app.sessions().issue(&body.username);
     {
         let db = app.db();
-        let _ = audit(
+        let _ = audit_kind(
             &db,
+            AUDIT_ADMIN,
             &format!("admin:{}", body.username),
             "admin_login",
             None,
@@ -164,7 +205,7 @@ pub async fn logout(State(app): State<Shared>, admin: Admin, parts: Parts) -> Re
         app.sessions().revoke(&token);
     }
     let db = app.db();
-    let _ = audit(&db, &admin.actor(), "admin_logout", None, None, None);
+    let _ = audit_kind(&db, AUDIT_ADMIN, &admin.actor(), "admin_logout", None, None, None);
     info!(admin = %admin.0, "admin logout");
     let mut response = Json(json!({ "ok": true })).into_response();
     response.headers_mut().insert(
@@ -182,47 +223,21 @@ pub struct AdminListQuery {
     pub limit: i64,
 }
 
-fn fifty() -> i64 {
-    50
-}
-
 /// GET /admin/api/skills — everything, including withdrawn and taken down.
 pub async fn list_skills(
     State(app): State<Shared>,
     _admin: Admin,
     Query(query): Query<AdminListQuery>,
 ) -> Result<Json<Value>, ApiError> {
-    let pattern = format!("%{}%", query.q.trim());
-    let limit = query.limit.clamp(1, 200);
     let db = app.db();
-    let sql = r#"
-        SELECT s.slug, s.name, s.owner_tenant, t.display_name AS owner_name,
-               s.visibility, s.latest_version,
-               s.download_count,
-               COALESCE((SELECT MAX(v.created_at) FROM skill_versions v WHERE v.slug = s.slug),
-                        s.created_at) AS updated_at,
-               s.created_at, s.withdrawn_at, s.takedown_at, s.takedown_reason,
-               (SELECT json_extract(v.bundle_json, '$."SKILL.md"')
-                  FROM skill_versions v
-                 WHERE v.slug = s.slug AND v.version = s.latest_version) AS manifest,
-               COALESCE((SELECT COUNT(*) FROM skill_versions v WHERE v.slug = s.slug), 0) AS versions,
-               COALESCE((SELECT SUM(size_bytes) FROM skill_versions v WHERE v.slug = s.slug), 0) AS size_bytes
-        FROM skills s
-        LEFT JOIN tenants t ON t.id = s.owner_tenant
-        WHERE s.slug LIKE ?1 OR s.name LIKE ?1
-        ORDER BY s.created_at DESC
-        LIMIT ?2
-    "#;
-    let mut stmt = db.prepare(sql).map_err(internal)?;
-    let items = stmt
-        .query_map(params![pattern, limit], |row| {
-            row_to_admin_skill(row, &app.cfg.public_url)
-        })
-        .map_err(internal)?
-        .collect::<rusqlite::Result<Vec<_>>>()
-        .map_err(internal)?;
-    debug!(items = items.len(), "admin skill listing");
-    Ok(Json(json!({ "items": items })))
+    market::list_admin(
+        &db,
+        &market::SKILL,
+        &query.q,
+        query.limit.clamp(1, 200),
+        &app.cfg.public_url,
+    )
+    .map(Json)
 }
 
 #[derive(Debug, Deserialize)]
@@ -237,42 +252,13 @@ pub async fn takedown(
     admin: Admin,
     Path(slug): Path<String>,
     body: Option<Json<TakedownRequest>>,
-) -> Result<Json<Value>, ApiError> {
+) -> ApiResult<Json<Value>> {
     let reason = body
         .and_then(|Json(b)| b.reason)
         .filter(|r| !r.trim().is_empty());
     let db = app.db();
-    let changed = db
-        .execute(
-            "UPDATE skills SET takedown_at = ?2, takedown_by = ?3, takedown_reason = ?4
-             WHERE slug = ?1",
-            params![slug, now(), admin.0, reason],
-        )
-        .map_err(internal)?;
-    if changed == 0 {
-        warn!(admin = %admin.0, slug = %slug, "takedown: unknown skill");
-        return Err(ApiError::new(
-            StatusCode::NOT_FOUND,
-            "not_found",
-            "技能不存在",
-        ));
-    }
-    info!(
-        admin = %admin.0,
-        slug = %slug,
-        reason = reason.as_deref().unwrap_or("-"),
-        "skill taken down"
-    );
-    audit(
-        &db,
-        &admin.actor(),
-        "takedown",
-        Some(&slug),
-        None,
-        reason.as_deref(),
-    )
-    .map_err(internal)?;
-    Ok(Json(json!({ "slug": slug, "state": "taken_down" })))
+    let change = market::Change::Takedown { reason };
+    market::change_state(&db, &market::SKILL, &slug, change, &admin.actor()).map(Json)
 }
 
 /// POST /admin/api/skills/{slug}/restore
@@ -280,34 +266,9 @@ pub async fn restore(
     State(app): State<Shared>,
     admin: Admin,
     Path(slug): Path<String>,
-) -> Result<Json<Value>, ApiError> {
+) -> ApiResult<Json<Value>> {
     let db = app.db();
-    let changed = db
-        .execute(
-            "UPDATE skills SET takedown_at = NULL, takedown_by = NULL, takedown_reason = NULL
-             WHERE slug = ?1",
-            params![slug],
-        )
-        .map_err(internal)?;
-    if changed == 0 {
-        warn!(admin = %admin.0, slug = %slug, "admin restore: unknown skill");
-        return Err(ApiError::new(
-            StatusCode::NOT_FOUND,
-            "not_found",
-            "技能不存在",
-        ));
-    }
-    info!(admin = %admin.0, slug = %slug, "takedown revoked");
-    audit(
-        &db,
-        &admin.actor(),
-        "admin_restore",
-        Some(&slug),
-        None,
-        None,
-    )
-    .map_err(internal)?;
-    Ok(Json(json!({ "slug": slug, "state": "active" })))
+    market::change_state(&db, &market::SKILL, &slug, market::Change::Lift, &admin.actor()).map(Json)
 }
 
 #[derive(Debug, Deserialize)]
@@ -334,7 +295,7 @@ pub async fn audit_log(
         .kind
         .as_deref()
         .map(str::trim)
-        .filter(|kind| matches!(*kind, "skill" | "agent"))
+        .filter(|kind| [AUDIT_SKILL, AUDIT_AGENT, AUDIT_ADMIN].contains(kind))
         .map(str::to_string);
     let mut stmt = db
         .prepare(
@@ -343,7 +304,7 @@ pub async fn audit_log(
              WHERE (?2 IS NULL OR kind = ?2)
              ORDER BY id DESC LIMIT ?1",
         )
-        .map_err(internal)?;
+        .map_err(ApiError::db)?;
     let items = stmt
         .query_map(params![query.limit.clamp(1, 1000), kind], |row| {
             Ok(json!({
@@ -357,46 +318,9 @@ pub async fn audit_log(
                 "detail": row.get::<_, Option<String>>(7)?,
             }))
         })
-        .map_err(internal)?
+        .map_err(ApiError::db)?
         .collect::<rusqlite::Result<Vec<_>>>()
-        .map_err(internal)?;
+        .map_err(ApiError::db)?;
     debug!(items = items.len(), "audit log");
     Ok(Json(json!({ "items": items })))
-}
-
-fn internal(err: rusqlite::Error) -> ApiError {
-    error!(error = %err, "database error");
-    ApiError::new(
-        StatusCode::INTERNAL_SERVER_ERROR,
-        "db_error",
-        format!("数据库错误：{err}"),
-    )
-}
-
-fn row_to_admin_skill(row: &rusqlite::Row<'_>, public_url: &str) -> rusqlite::Result<SkillRow> {
-    let slug: String = row.get("slug")?;
-    let latest: Option<String> = row.get("latest_version")?;
-    Ok(SkillRow {
-        install_url: latest.map(|version| format!("{public_url}/skills/{slug}/{version}")),
-        slug,
-        name: row.get("name")?,
-        owner_tenant: row.get("owner_tenant")?,
-        owner_name: row.get("owner_name")?,
-        description: crate::api::row_description(row)?,
-        visibility: row.get("visibility")?,
-        latest_version: row.get("latest_version")?,
-        created_at: row.get("created_at")?,
-        updated_at: row.get("updated_at")?,
-        download_count: row.get("download_count")?,
-        withdrawn_at: row.get("withdrawn_at")?,
-        takedown_at: row.get("takedown_at")?,
-        takedown_reason: row.get("takedown_reason")?,
-        versions: row.get("versions")?,
-        size_bytes: row.get("size_bytes")?,
-    })
-}
-
-#[allow(dead_code)]
-fn unused_salt() -> SaltString {
-    SaltString::generate(&mut OsRng)
 }
