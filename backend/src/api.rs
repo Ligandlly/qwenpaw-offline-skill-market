@@ -13,6 +13,7 @@ use std::collections::BTreeMap;
 use tracing::{debug, error, info, warn};
 
 use crate::auth::TenantId;
+use crate::db;
 use crate::dto::{default_visibility, ListQuery, LookupQuery};
 use crate::error::{ApiError, ApiResult};
 use crate::limits::{self, FileData, MANIFEST};
@@ -37,14 +38,24 @@ pub async fn list_skills(
     tenant: TenantId,
     Query(q): Query<ListQuery>,
 ) -> ApiResult<Json<Value>> {
-    let db = app.db();
-    market::list_page(&db, &market::SKILL, &tenant.0, &q, &app.cfg.public_url).map(Json)
+    let tenant = tenant.0;
+    db::offload(&app, move |app| {
+        let db = app.db();
+        market::list_page(&db, &market::SKILL, &tenant, &q, &app.cfg.public_url)
+    })
+    .await
+    .map(Json)
 }
 
 /// GET /api/v1/skills/mine — everything the tenant owns, including withdrawn.
 pub async fn list_mine(State(app): State<Shared>, tenant: TenantId) -> ApiResult<Json<Value>> {
-    let db = app.db();
-    market::list_owned(&db, &market::SKILL, &tenant.0, &app.cfg.public_url).map(Json)
+    let tenant = tenant.0;
+    db::offload(&app, move |app| {
+        let db = app.db();
+        market::list_owned(&db, &market::SKILL, &tenant, &app.cfg.public_url)
+    })
+    .await
+    .map(Json)
 }
 
 /// GET /api/v1/skills/{slug}/status — drives the "已下架" badge on installs.
@@ -53,8 +64,13 @@ pub async fn skill_status(
     tenant: TenantId,
     Path(slug): Path<String>,
 ) -> ApiResult<Json<Value>> {
-    let db = app.db();
-    market::status(&db, &market::SKILL, &tenant.0, &slug).map(Json)
+    let tenant = tenant.0;
+    db::offload(&app, move |app| {
+        let db = app.db();
+        market::status(&db, &market::SKILL, &tenant, &slug)
+    })
+    .await
+    .map(Json)
 }
 
 #[derive(Debug, Deserialize)]
@@ -98,8 +114,13 @@ pub async fn lookup_skills(
     tenant: TenantId,
     Query(query): Query<LookupQuery>,
 ) -> ApiResult<Json<Value>> {
-    let db = app.db();
-    market::lookup(&db, &market::SKILL, &tenant.0, &query.names, &app.cfg.public_url).map(Json)
+    let tenant = tenant.0;
+    db::offload(&app, move |app| {
+        let db = app.db();
+        market::lookup(&db, &market::SKILL, &tenant, &query.names, &app.cfg.public_url)
+    })
+    .await
+    .map(Json)
 }
 
 /// POST /api/v1/skills — publish an immutable version.
@@ -108,11 +129,19 @@ pub async fn publish(
     tenant: TenantId,
     Json(body): Json<PublishRequest>,
 ) -> ApiResult<(StatusCode, Json<Value>)> {
+    db::offload(&app, move |app| publish_sync(app, &tenant, body)).await
+}
+
+fn publish_sync(
+    app: &Shared,
+    tenant: &TenantId,
+    body: PublishRequest,
+) -> ApiResult<(StatusCode, Json<Value>)> {
     let publisher = clean_publisher_name(body.publisher_name.as_deref());
     market::require_fields(&body.version, &body.visibility)?;
     let slug = market::required_slug(
         &market::SKILL,
-        &app,
+        app,
         &tenant.0,
         &body.name,
         body.slug.as_deref(),
@@ -233,11 +262,21 @@ pub async fn validate(
     tenant: TenantId,
     Json(body): Json<PublishRequest>,
 ) -> ApiResult<Json<Value>> {
+    db::offload(&app, move |app| validate_sync(app, &tenant, body))
+        .await
+        .map(Json)
+}
+
+fn validate_sync(
+    app: &Shared,
+    tenant: &TenantId,
+    body: PublishRequest,
+) -> ApiResult<Value> {
     let mut problems: Vec<market::Problem> = Vec::new();
     market::check_fields(&body.version, &body.visibility, &mut problems);
     let slug = market::resolve_slug(
         &market::SKILL,
-        &app,
+        app,
         &tenant.0,
         &body.name,
         body.slug.as_deref(),
@@ -273,21 +312,19 @@ pub async fn validate(
         problems = problems.len(),
         "validate"
     );
-    Ok(Json(
-        market::Answer {
-            cfg: &app.cfg,
-            name: body.name.clone(),
-            version: body.version.clone(),
-            visibility: body.visibility.clone(),
-            slug,
-            files: &body.files,
-            manifest,
-            existing,
-            next_version,
-            problems,
-        }
-        .to_json(),
-    ))
+    Ok(market::Answer {
+        cfg: &app.cfg,
+        name: body.name.clone(),
+        version: body.version.clone(),
+        visibility: body.visibility.clone(),
+        slug,
+        files: &body.files,
+        manifest,
+        existing,
+        next_version,
+        problems,
+    }
+    .to_json())
 }
 
 /// POST /api/v1/skills/{slug}/withdraw — owner may pull its own skill.
@@ -298,16 +335,20 @@ pub async fn withdraw(
     body: Option<Json<WithdrawRequest>>,
 ) -> ApiResult<Json<Value>> {
     let reason = body.and_then(|Json(b)| b.reason);
-    let db = app.db();
-    let claim = market::listing(&db, &market::SKILL, &slug)?
-        .ok_or_else(|| ApiError::not_found("技能不存在"))?;
-    claim.guard(
-        &tenant.0,
-        "只有发布者所在团队才能下架",
-        "该条目已被管理员下架",
-    )?;
-    let change = market::Change::Withdraw { reason };
-    market::change_state(&db, &market::SKILL, &slug, change, &tenant.actor()).map(Json)
+    db::offload(&app, move |app| {
+        let db = app.db();
+        let claim = market::listing(&db, &market::SKILL, &slug)?
+            .ok_or_else(|| ApiError::not_found("技能不存在"))?;
+        claim.guard(
+            &tenant.0,
+            "只有发布者所在团队才能下架",
+            "该条目已被管理员下架",
+        )?;
+        let change = market::Change::Withdraw { reason };
+        market::change_state(&db, &market::SKILL, &slug, change, &tenant.actor())
+    })
+    .await
+    .map(Json)
 }
 
 /// POST /api/v1/skills/{slug}/restore — reversible unless an admin took it down.
@@ -316,15 +357,19 @@ pub async fn restore(
     tenant: TenantId,
     Path(slug): Path<String>,
 ) -> ApiResult<Json<Value>> {
-    let db = app.db();
-    let claim = market::listing(&db, &market::SKILL, &slug)?
-        .ok_or_else(|| ApiError::not_found("技能不存在"))?;
-    claim.guard(
-        &tenant.0,
-        "只有发布者所在团队才能重新上架",
-        "该技能由管理员下架，不能自行恢复上架",
-    )?;
-    market::change_state(&db, &market::SKILL, &slug, market::Change::Restore, &tenant.actor()).map(Json)
+    db::offload(&app, move |app| {
+        let db = app.db();
+        let claim = market::listing(&db, &market::SKILL, &slug)?
+            .ok_or_else(|| ApiError::not_found("技能不存在"))?;
+        claim.guard(
+            &tenant.0,
+            "只有发布者所在团队才能重新上架",
+            "该技能由管理员下架，不能自行恢复上架",
+        )?;
+        market::change_state(&db, &market::SKILL, &slug, market::Change::Restore, &tenant.actor())
+    })
+    .await
+    .map(Json)
 }
 
 /// GET /skills/{slug}/{version} (alias of the bundle route) — this is the URL
@@ -334,15 +379,19 @@ pub async fn fetch_bundle(
     tenant: TenantId,
     Path((slug, version)): Path<(String, String)>,
 ) -> ApiResult<Json<Value>> {
-    let db = app.db();
-    let payload = market::bundle(&db, &market::SKILL, &app.cfg, &tenant.0, &slug, &version)?;
-    // A skill payload carries no description: the manifest is the contract.
-    Ok(Json(json!({
-        "name": payload.name,
-        "version": payload.version,
-        "files": payload.files,
-        "source_url": payload.source_url,
-    })))
+    db::offload(&app, move |app| {
+        let db = app.db();
+        let payload = market::bundle(&db, &market::SKILL, &app.cfg, &tenant.0, &slug, &version)?;
+        // A skill payload carries no description: the manifest is the contract.
+        Ok(json!({
+            "name": payload.name,
+            "version": payload.version,
+            "files": payload.files,
+            "source_url": payload.source_url,
+        }))
+    })
+    .await
+    .map(Json)
 }
 
 // ------------------------------------------------------------------ helpers ---

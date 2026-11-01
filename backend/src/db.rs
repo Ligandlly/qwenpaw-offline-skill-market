@@ -1,7 +1,18 @@
 //! SQLite schema + thin helpers. No ORM: the schema is small and read-mostly.
 
+use axum::http::StatusCode;
 use rusqlite::Connection;
 use std::path::Path;
+use std::time::Duration;
+
+use crate::error::{ApiError, ApiResult};
+use crate::state::Shared;
+
+/// How long a writer waits for the lock before giving up. The process holds a
+/// single connection, but an operator's `sqlite3` session or a second replica on
+/// the same file can hold the write lock; without this every such overlap is an
+/// instant `SQLITE_BUSY` error.
+const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub const SCHEMA: &str = r#"
 PRAGMA journal_mode = WAL;
@@ -100,6 +111,7 @@ pub fn open(path: &Path) -> rusqlite::Result<Connection> {
         }
     }
     let conn = Connection::open(path)?;
+    conn.busy_timeout(BUSY_TIMEOUT)?;
     conn.execute_batch(SCHEMA)?;
     migrate(&conn)?;
     Ok(conn)
@@ -107,6 +119,7 @@ pub fn open(path: &Path) -> rusqlite::Result<Connection> {
 
 pub fn open_memory() -> rusqlite::Result<Connection> {
     let conn = Connection::open_in_memory()?;
+    conn.busy_timeout(BUSY_TIMEOUT)?;
     conn.execute_batch(SCHEMA)?;
     migrate(&conn)?;
     Ok(conn)
@@ -150,6 +163,36 @@ fn ensure_column(
         tracing::info!(table, column, "schema: column added");
     }
     Ok(())
+}
+
+/// Runs blocking SQLite work on the blocking pool instead of a runtime worker.
+///
+/// rusqlite is synchronous and the one connection sits behind a mutex, so a
+/// handler that queries inline parks a tokio worker thread — first while it
+/// waits for the lock, then while the query runs. Under any concurrency that
+/// starves the async side of the runtime, which is exactly the failure mode
+/// "the market got slow and stopped answering /health" describes. Every
+/// handler that touches the database goes through here instead.
+///
+/// The closure gets the `Shared` rather than a `&Connection` so it can still
+/// read `app.cfg` (bundle URLs, limits) without cloning them per request.
+pub async fn offload<T, F>(app: &Shared, work: F) -> ApiResult<T>
+where
+    F: FnOnce(&Shared) -> ApiResult<T> + Send + 'static,
+    T: Send + 'static,
+{
+    let app = app.clone();
+    match tokio::task::spawn_blocking(move || work(&app)).await {
+        Ok(result) => result,
+        Err(err) => {
+            tracing::error!(error = %err, "blocking market task failed");
+            Err(ApiError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal",
+                "内部任务失败，请稍后重试",
+            ))
+        }
+    }
 }
 
 pub fn now() -> i64 {

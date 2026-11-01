@@ -17,6 +17,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::slug::clean_publisher_name;
 use crate::dto::{default_visibility, fifty, ListQuery, LookupQuery};
+use crate::db;
 use crate::error::{ApiError, ApiResult};
 use crate::auth::{Admin, TenantId};
 use crate::limits::{self, FileData, Reject};
@@ -291,14 +292,24 @@ pub async fn list_agents(
     tenant: TenantId,
     Query(q): Query<ListQuery>,
 ) -> ApiResult<Json<Value>> {
-    let db = app.db();
-    market::list_page(&db, &market::AGENT, &tenant.0, &q, &app.cfg.public_url).map(Json)
+    let tenant = tenant.0;
+    db::offload(&app, move |app| {
+        let db = app.db();
+        market::list_page(&db, &market::AGENT, &tenant, &q, &app.cfg.public_url)
+    })
+    .await
+    .map(Json)
 }
 
 /// GET /api/v1/agents/mine
 pub async fn list_mine(State(app): State<Shared>, tenant: TenantId) -> ApiResult<Json<Value>> {
-    let db = app.db();
-    market::list_owned(&db, &market::AGENT, &tenant.0, &app.cfg.public_url).map(Json)
+    let tenant = tenant.0;
+    db::offload(&app, move |app| {
+        let db = app.db();
+        market::list_owned(&db, &market::AGENT, &tenant, &app.cfg.public_url)
+    })
+    .await
+    .map(Json)
 }
 
 /// GET /api/v1/agents/lookup?names=a,b — display name -> market slug + state.
@@ -307,8 +318,13 @@ pub async fn lookup_agents(
     tenant: TenantId,
     Query(query): Query<LookupQuery>,
 ) -> ApiResult<Json<Value>> {
-    let db = app.db();
-    market::lookup(&db, &market::AGENT, &tenant.0, &query.names, &app.cfg.public_url).map(Json)
+    let tenant = tenant.0;
+    db::offload(&app, move |app| {
+        let db = app.db();
+        market::lookup(&db, &market::AGENT, &tenant, &query.names, &app.cfg.public_url)
+    })
+    .await
+    .map(Json)
 }
 
 /// POST /api/v1/agents/validate — dry run of a publish, nothing is written.
@@ -321,6 +337,12 @@ pub async fn validate(
     tenant: TenantId,
     Json(body): Json<PublishRequest>,
 ) -> ApiResult<Json<Value>> {
+    db::offload(&app, move |app| validate_sync(app, &tenant, body))
+        .await
+        .map(Json)
+}
+
+fn validate_sync(app: &Shared, tenant: &TenantId, body: PublishRequest) -> ApiResult<Value> {
     let mut problems: Vec<market::Problem> = Vec::new();
     market::check_fields(&body.version, &body.visibility, &mut problems);
 
@@ -346,7 +368,7 @@ pub async fn validate(
     } else {
         market::resolve_slug(
             &market::AGENT,
-            &app,
+            app,
             &tenant.0,
             &name,
             body.slug.as_deref(),
@@ -369,21 +391,19 @@ pub async fn validate(
         problems = problems.len(),
         "agent validate"
     );
-    Ok(Json(
-        market::Answer {
-            cfg: &app.cfg,
-            name,
-            version: body.version.clone(),
-            visibility: body.visibility.clone(),
-            slug,
-            files: &body.files,
-            manifest,
-            existing,
-            next_version,
-            problems,
-        }
-        .to_json(),
-    ))
+    Ok(market::Answer {
+        cfg: &app.cfg,
+        name,
+        version: body.version.clone(),
+        visibility: body.visibility.clone(),
+        slug,
+        files: &body.files,
+        manifest,
+        existing,
+        next_version,
+        problems,
+    }
+    .to_json())
 }
 
 /// GET /api/v1/agents/{slug}/status
@@ -392,8 +412,13 @@ pub async fn agent_status(
     tenant: TenantId,
     Path(slug): Path<String>,
 ) -> ApiResult<Json<Value>> {
-    let db = app.db();
-    market::status(&db, &market::AGENT, &tenant.0, &slug).map(Json)
+    let tenant = tenant.0;
+    db::offload(&app, move |app| {
+        let db = app.db();
+        market::status(&db, &market::AGENT, &tenant, &slug)
+    })
+    .await
+    .map(Json)
 }
 
 // ---------------------------------------------------------------- publish ---
@@ -415,6 +440,14 @@ pub async fn publish(
     State(app): State<Shared>,
     tenant: TenantId,
     Json(body): Json<PublishRequest>,
+) -> ApiResult<(StatusCode, Json<Value>)> {
+    db::offload(&app, move |app| publish_sync(app, &tenant, body)).await
+}
+
+fn publish_sync(
+    app: &Shared,
+    tenant: &TenantId,
+    body: PublishRequest,
 ) -> ApiResult<(StatusCode, Json<Value>)> {
     market::require_fields(&body.version, &body.visibility)?;
 
@@ -439,7 +472,7 @@ pub async fn publish(
     // derived from it.
     let slug = market::required_slug(
         &market::AGENT,
-        &app,
+        app,
         &tenant.0,
         &name,
         body.slug.as_deref(),
@@ -540,16 +573,20 @@ pub async fn withdraw(
     body: Option<Json<WithdrawRequest>>,
 ) -> ApiResult<Json<Value>> {
     let reason = body.and_then(|Json(b)| b.reason);
-    let db = app.db();
-    let claim = market::listing(&db, &market::AGENT, &slug)?
-        .ok_or_else(|| ApiError::not_found("智能体不存在"))?;
-    claim.guard(
-        &tenant.0,
-        "只有发布者所在团队才能下架",
-        "该条目已被管理员下架",
-    )?;
-    let change = market::Change::Withdraw { reason };
-    market::change_state(&db, &market::AGENT, &slug, change, &tenant.actor()).map(Json)
+    db::offload(&app, move |app| {
+        let db = app.db();
+        let claim = market::listing(&db, &market::AGENT, &slug)?
+            .ok_or_else(|| ApiError::not_found("智能体不存在"))?;
+        claim.guard(
+            &tenant.0,
+            "只有发布者所在团队才能下架",
+            "该条目已被管理员下架",
+        )?;
+        let change = market::Change::Withdraw { reason };
+        market::change_state(&db, &market::AGENT, &slug, change, &tenant.actor())
+    })
+    .await
+    .map(Json)
 }
 
 pub async fn restore(
@@ -557,15 +594,19 @@ pub async fn restore(
     tenant: TenantId,
     Path(slug): Path<String>,
 ) -> ApiResult<Json<Value>> {
-    let db = app.db();
-    let claim = market::listing(&db, &market::AGENT, &slug)?
-        .ok_or_else(|| ApiError::not_found("智能体不存在"))?;
-    claim.guard(
-        &tenant.0,
-        "只有发布者所在团队才能重新上架",
-        "该智能体由管理员下架，不能自行恢复上架",
-    )?;
-    market::change_state(&db, &market::AGENT, &slug, market::Change::Restore, &tenant.actor()).map(Json)
+    db::offload(&app, move |app| {
+        let db = app.db();
+        let claim = market::listing(&db, &market::AGENT, &slug)?
+            .ok_or_else(|| ApiError::not_found("智能体不存在"))?;
+        claim.guard(
+            &tenant.0,
+            "只有发布者所在团队才能重新上架",
+            "该智能体由管理员下架，不能自行恢复上架",
+        )?;
+        market::change_state(&db, &market::AGENT, &slug, market::Change::Restore, &tenant.actor())
+    })
+    .await
+    .map(Json)
 }
 
 // ----------------------------------------------------------------- bundle ---
@@ -576,15 +617,19 @@ pub async fn fetch_bundle(
     tenant: TenantId,
     Path((slug, version)): Path<(String, String)>,
 ) -> ApiResult<Json<Value>> {
-    let db = app.db();
-    let payload = market::bundle(&db, &market::AGENT, &app.cfg, &tenant.0, &slug, &version)?;
-    Ok(Json(json!({
-        "name": payload.name,
-        "description": payload.description,
-        "version": payload.version,
-        "files": payload.files,
-        "source_url": payload.source_url,
-    })))
+    db::offload(&app, move |app| {
+        let db = app.db();
+        let payload = market::bundle(&db, &market::AGENT, &app.cfg, &tenant.0, &slug, &version)?;
+        Ok(json!({
+            "name": payload.name,
+            "description": payload.description,
+            "version": payload.version,
+            "files": payload.files,
+            "source_url": payload.source_url,
+        }))
+    })
+    .await
+    .map(Json)
 }
 
 // ------------------------------------------------------------------ admin ---
@@ -602,15 +647,13 @@ pub async fn admin_list(
     State(app): State<Shared>,
     _admin: Admin,
     Query(query): Query<AdminListQuery>,
-) -> Result<Json<Value>, ApiError> {
-    let db = app.db();
-    market::list_admin(
-        &db,
-        &market::AGENT,
-        &query.q,
-        query.limit.clamp(1, 200),
-        &app.cfg.public_url,
-    )
+) -> ApiResult<Json<Value>> {
+    let limit = query.limit.clamp(1, 200);
+    db::offload(&app, move |app| {
+        let db = app.db();
+        market::list_admin(&db, &market::AGENT, &query.q, limit, &app.cfg.public_url)
+    })
+    .await
     .map(Json)
 }
 
@@ -630,9 +673,13 @@ pub async fn admin_takedown(
     let reason = body
         .and_then(|Json(b)| b.reason)
         .filter(|r| !r.trim().is_empty());
-    let db = app.db();
-    let change = market::Change::Takedown { reason };
-    market::change_state(&db, &market::AGENT, &slug, change, &admin.actor()).map(Json)
+    db::offload(&app, move |app| {
+        let db = app.db();
+        let change = market::Change::Takedown { reason };
+        market::change_state(&db, &market::AGENT, &slug, change, &admin.actor())
+    })
+    .await
+    .map(Json)
 }
 
 /// POST /admin/api/agents/{slug}/restore
@@ -641,8 +688,12 @@ pub async fn admin_restore(
     admin: Admin,
     Path(slug): Path<String>,
 ) -> ApiResult<Json<Value>> {
-    let db = app.db();
-    market::change_state(&db, &market::AGENT, &slug, market::Change::Lift, &admin.actor()).map(Json)
+    db::offload(&app, move |app| {
+        let db = app.db();
+        market::change_state(&db, &market::AGENT, &slug, market::Change::Lift, &admin.actor())
+    })
+    .await
+    .map(Json)
 }
 
 #[cfg(test)]

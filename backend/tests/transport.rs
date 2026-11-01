@@ -112,3 +112,20 @@ async fn a_stalled_request_becomes_a_json_error_instead_of_hanging() {
     let answer: Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(answer["error"]["code"], "timeout", "{answer}");
 }
+
+/// Database work runs on the blocking pool, so a panic inside a query must
+/// surface as one failed request — not as a dead runtime worker.
+#[tokio::test]
+async fn a_panicking_query_fails_one_request_not_the_runtime() {
+    let h = Harness::new();
+    let result: Result<(), _> =
+        offline_market_backend::db::offload(&h.state, |_app| panic!("boom")).await;
+    let err = result.expect_err("a panicking query must not come back as Ok");
+    assert_eq!(err.status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(err.code, "internal");
+    // Still serving: the runtime survived the panic.
+    let (status, body, _) = h
+        .call("GET", "/api/v1/skills", Some("alpha"), None, None)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+}

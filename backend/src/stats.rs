@@ -17,6 +17,12 @@ use crate::db::now;
 use crate::state::Shared;
 
 pub async fn overview(State(app): State<Shared>, tenant: TenantId) -> ApiResult<Json<Value>> {
+    crate::db::offload(&app, move |app| dashboard(app, &tenant.0))
+        .await
+        .map(Json)
+}
+
+fn dashboard(app: &Shared, tenant: &str) -> ApiResult<Value> {
     let db = app.db();
     let month_start: i64 = db
         .query_row(
@@ -26,14 +32,14 @@ pub async fn overview(State(app): State<Shared>, tenant: TenantId) -> ApiResult<
         )
         .map_err(ApiError::db)?;
 
-    let skills = counts(&db, "skills", &tenant.0, month_start).map_err(ApiError::db)?;
-    let agents = counts(&db, "agents", &tenant.0, month_start).map_err(ApiError::db)?;
+    let skills = counts(&db, "skills", tenant, month_start).map_err(ApiError::db)?;
+    let agents = counts(&db, "agents", tenant, month_start).map_err(ApiError::db)?;
     let downloads =
         skills["downloads"].as_i64().unwrap_or(0) + agents["downloads"].as_i64().unwrap_or(0);
     let new_this_month = skills["new_this_month"].as_i64().unwrap_or(0)
         + agents["new_this_month"].as_i64().unwrap_or(0);
 
-    Ok(Json(json!({
+    Ok(json!({
         "skills": skills,
         "agents": agents,
         "totals": {
@@ -44,7 +50,7 @@ pub async fn overview(State(app): State<Shared>, tenant: TenantId) -> ApiResult<
         },
         "month_start": month_start,
         "generated_at": now(),
-    })))
+    }))
 }
 
 fn counts(db: &Connection, table: &str, tenant: &str, month_start: i64) -> rusqlite::Result<Value> {

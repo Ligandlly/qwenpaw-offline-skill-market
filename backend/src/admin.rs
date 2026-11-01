@@ -106,6 +106,19 @@ pub async fn login(
     State(app): State<Shared>,
     Json(body): Json<LoginRequest>,
 ) -> Result<Response, ApiError> {
+    let (username, token) = crate::db::offload(&app, move |app| login_sync(app, body)).await?;
+    let mut response = Json(json!({ "username": username })).into_response();
+    response.headers_mut().insert(
+        header::SET_COOKIE,
+        HeaderValue::from_str(&auth::set_cookie(&token))
+            .unwrap_or_else(|_| HeaderValue::from_static("market_admin=")),
+    );
+    Ok(response)
+}
+
+/// The CPU-bound half of a sign-in: the Argon2 check alone costs ~100 ms, so it
+/// belongs on the blocking pool together with the queries around it.
+fn login_sync(app: &Shared, body: LoginRequest) -> ApiResult<(String, String)> {
     if body.username.len() > MAX_USERNAME_LEN || body.password.len() > MAX_PASSWORD_LEN {
         return Err(ApiError::bad_request(
             "invalid_credentials",
@@ -185,14 +198,7 @@ pub async fn login(
         );
     }
     info!(username = %body.username, "admin login");
-    let response = Json(json!({ "username": body.username })).into_response();
-    let mut response = response;
-    response.headers_mut().insert(
-        header::SET_COOKIE,
-        HeaderValue::from_str(&auth::set_cookie(&token))
-            .unwrap_or_else(|_| HeaderValue::from_static("market_admin=")),
-    );
-    Ok(response)
+    Ok((body.username, token))
 }
 
 /// POST /admin/api/logout
@@ -204,8 +210,13 @@ pub async fn logout(State(app): State<Shared>, admin: Admin, parts: Parts) -> Re
     if let Some(token) = auth::session_token(cookie) {
         app.sessions().revoke(&token);
     }
-    let db = app.db();
-    let _ = audit_kind(&db, AUDIT_ADMIN, &admin.actor(), "admin_logout", None, None, None);
+    let actor = admin.actor();
+    let _ = crate::db::offload(&app, move |app| {
+        let db = app.db();
+        let _ = audit_kind(&db, AUDIT_ADMIN, &actor, "admin_logout", None, None, None);
+        Ok(())
+    })
+    .await;
     info!(admin = %admin.0, "admin logout");
     let mut response = Json(json!({ "ok": true })).into_response();
     response.headers_mut().insert(
@@ -228,15 +239,13 @@ pub async fn list_skills(
     State(app): State<Shared>,
     _admin: Admin,
     Query(query): Query<AdminListQuery>,
-) -> Result<Json<Value>, ApiError> {
-    let db = app.db();
-    market::list_admin(
-        &db,
-        &market::SKILL,
-        &query.q,
-        query.limit.clamp(1, 200),
-        &app.cfg.public_url,
-    )
+) -> ApiResult<Json<Value>> {
+    let limit = query.limit.clamp(1, 200);
+    crate::db::offload(&app, move |app| {
+        let db = app.db();
+        market::list_admin(&db, &market::SKILL, &query.q, limit, &app.cfg.public_url)
+    })
+    .await
     .map(Json)
 }
 
@@ -256,9 +265,13 @@ pub async fn takedown(
     let reason = body
         .and_then(|Json(b)| b.reason)
         .filter(|r| !r.trim().is_empty());
-    let db = app.db();
-    let change = market::Change::Takedown { reason };
-    market::change_state(&db, &market::SKILL, &slug, change, &admin.actor()).map(Json)
+    crate::db::offload(&app, move |app| {
+        let db = app.db();
+        let change = market::Change::Takedown { reason };
+        market::change_state(&db, &market::SKILL, &slug, change, &admin.actor())
+    })
+    .await
+    .map(Json)
 }
 
 /// POST /admin/api/skills/{slug}/restore
@@ -267,8 +280,12 @@ pub async fn restore(
     admin: Admin,
     Path(slug): Path<String>,
 ) -> ApiResult<Json<Value>> {
-    let db = app.db();
-    market::change_state(&db, &market::SKILL, &slug, market::Change::Lift, &admin.actor()).map(Json)
+    crate::db::offload(&app, move |app| {
+        let db = app.db();
+        market::change_state(&db, &market::SKILL, &slug, market::Change::Lift, &admin.actor())
+    })
+    .await
+    .map(Json)
 }
 
 #[derive(Debug, Deserialize)]
@@ -289,11 +306,18 @@ pub async fn audit_log(
     State(app): State<Shared>,
     _admin: Admin,
     Query(query): Query<AuditQuery>,
-) -> Result<Json<Value>, ApiError> {
-    let db = app.db();
-    let kind = query
-        .kind
-        .as_deref()
+) -> ApiResult<Json<Value>> {
+    let limit = query.limit.clamp(1, 1000);
+    crate::db::offload(&app, move |app| {
+        let db = app.db();
+        audit_page(&db, limit, query.kind.as_deref())
+    })
+    .await
+    .map(Json)
+}
+
+fn audit_page(db: &rusqlite::Connection, limit: i64, kind: Option<&str>) -> ApiResult<Value> {
+    let kind = kind
         .map(str::trim)
         .filter(|kind| [AUDIT_SKILL, AUDIT_AGENT, AUDIT_ADMIN].contains(kind))
         .map(str::to_string);
@@ -306,7 +330,7 @@ pub async fn audit_log(
         )
         .map_err(ApiError::db)?;
     let items = stmt
-        .query_map(params![query.limit.clamp(1, 1000), kind], |row| {
+        .query_map(params![limit, kind], |row| {
             Ok(json!({
                 "id": row.get::<_, i64>(0)?,
                 "at": row.get::<_, i64>(1)?,
@@ -322,5 +346,5 @@ pub async fn audit_log(
         .collect::<rusqlite::Result<Vec<_>>>()
         .map_err(ApiError::db)?;
     debug!(items = items.len(), "audit log");
-    Ok(Json(json!({ "items": items })))
+    Ok(json!({ "items": items }))
 }
