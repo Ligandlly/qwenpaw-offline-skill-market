@@ -55,6 +55,7 @@ $env:MARKET_PUBLIC_URL="http://10.137.157.214:8080"; cargo run
 | `MARKET_MAX_BUNDLE_BYTES` | `2097152`（2 MiB） | 单包总字节 |
 | `MARKET_MAX_FILES` | `100` | 文件数 |
 | `MARKET_MAX_FILE_BYTES` | `262144`（256 KiB） | 单文件字节 |
+| `MARKET_REQUEST_TIMEOUT_MS` | `30000` | 单个请求的处理上限（毫秒），超时返回 503 `timeout`。默认值放宽是为上传大包留余量；与实际网络无关的抖动可调小 |
 
 ## 两个身份面
 
@@ -181,12 +182,15 @@ docker load -i offline-market-image.tar
 
 同一进程同时提供 agent 市场。包格式、宿主安装链路与后续安全项见
 [`docs/AGENT_MARKET.md`](../docs/AGENT_MARKET.md)；当前按决定**不启用独立额度**，
-只有 64 MiB 的 HTTP 请求体上限。
+请求体上限按路由设置：发布与干跑路由是 `MARKET_MAX_BUNDLE_BYTES × 6 + 64 KiB`
+（JSON 转义与 base64 的最坏展开），登录/登出 8 KiB，其余路由回落 axum 默认的 2 MiB。
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | GET | `/api/v1/agents?q=&page=&limit=` | 公开 + 自己的私有，已撤回/下架不出现 |
 | GET | `/api/v1/agents/mine` | 自己的全部（含已撤回） |
+| GET | `/api/v1/agents/lookup?names=a,b` | 展示名 → slug + 状态（与 `/api/v1/skills/lookup` 同构） |
+| POST | `/api/v1/agents/validate` | 发布前干跑（只读），信封与 `/api/v1/skills/validate` 一致 |
 | GET | `/api/v1/agents/{slug}/status` | `active` / `withdrawn` / `taken_down` |
 | POST | `/api/v1/agents` | 发布不可变版本 |
 | POST | `/api/v1/agents/{slug}/withdraw` | 属主撤回 |
@@ -195,7 +199,7 @@ docker load -i offline-market-image.tar
 | GET | `/admin/api/agents?q=&limit=` | 管理端全量列表 |
 | POST | `/admin/api/agents/{slug}/takedown` | `{reason}` 整包下架 |
 | POST | `/admin/api/agents/{slug}/restore` | 撤销下架 |
-| GET | `/admin/api/audit?kind=agent&limit=` | 审计按 `kind` 过滤（`skill`/`agent`） |
+| GET | `/admin/api/audit?kind=agent&limit=` | 审计按 `kind` 过滤（`skill`/`agent`/`admin`） |
 
 发布请求（`name` / `description` 来自包内 `manifest.json`）：
 

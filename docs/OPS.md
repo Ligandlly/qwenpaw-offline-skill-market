@@ -483,7 +483,7 @@ curl -s -H "x-tenant-id: <租户id>" http://<市场地址>:8080/api/v1/skills?li
 | `X-Tenant-Id` 是信任不是认证 | 后端必须只在内网暴露；能访问内网的人可以伪造租户 |
 | 审计只到租户 | 一租户一人的前提下等于到人；多用户租户需要再加身份 |
 | 限额改动需重启 | 环境变量是唯一来源 |
-| 智能体 MVP 无独立额度 | 只受 64 MiB HTTP 请求体限制；后续再加 `MARKET_MAX_AGENT_*` |
+| 智能体 MVP 无独立额度 | 只受发布路由的请求体上限与 `MARKET_MAX_*` 网关限制；后续再加 `MARKET_MAX_AGENT_*` |
 | 智能体卸载保留工作区 | 宿主只摘配置；容器内 `/workspace/workspaces/<id>` 需按 §2.6 手工清理 |
 | Docker Hub 网络禁容器互访 | 市场后端不能用同网络容器名，必须走宿主机网桥网关/`host.docker.internal`（§2.6） |
 | 智能体宿主 API 仅容器内 loopback | 不要手工把 `QWENPAW_RUNTIME_API_URL` 指向宿主机映射端口 |

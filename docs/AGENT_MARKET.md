@@ -156,7 +156,8 @@ skills/<skill-name>/... # 技能内任意文件
 ### 3.4 额度（本轮不实现）
 
 按本轮决定，智能体市场**暂不启用独立额度**，`MARKET_MAX_AGENT_*` 尚未实现。
-唯一的硬上限是 HTTP 传输层的 64 MiB 请求体（`DefaultBodyLimit`，防止一次 POST
+唯一的硬上限是 HTTP 传输层按路由的请求体上限（发布/干跑路由是
+`MARKET_MAX_BUNDLE_BYTES × 6 + 64 KiB`，为 JSON 转义与 base64 留出余量；登录路由 8 KiB；其余路由回落 axum 默认的 2 MiB，防止一次 POST
 把进程打爆），它不按文件/技能数计，也不属于市场语义。
 
 后续启用时再按下面的目标值加（改需重启）：
@@ -218,6 +219,8 @@ ALTER TABLE audit_log ADD COLUMN kind TEXT NOT NULL DEFAULT 'skill';  -- migrate
 | --- | --- | --- |
 | GET | `/api/v1/agents?q=&page=&limit=` | 公开 + 自己的私有；已撤回/下架不出现 |
 | GET | `/api/v1/agents/mine` | 自己的全部（含已撤回） |
+| GET | `/api/v1/agents/lookup?names=a,b` | 展示名 → slug + 状态，宿主用它把已安装的智能体对回市场 |
+| POST | `/api/v1/agents/validate` | 发布前干跑（只读），信封与 `/api/v1/skills/validate` 完全一致 |
 | GET | `/api/v1/agents/{slug}/status` | `active` / `withdrawn` / `taken_down` |
 | POST | `/api/v1/agents` | 发布不可变版本 |
 | POST | `/api/v1/agents/{slug}/withdraw` | 属主撤回 |
@@ -225,6 +228,8 @@ ALTER TABLE audit_log ADD COLUMN kind TEXT NOT NULL DEFAULT 'skill';  -- migrate
 | GET | `/api/v1/agents/{slug}/{version}/bundle` | 取 bundle；`version=latest` 走指针 |
 | GET | `/api/v1/slug?name=` | 标识符推导（中文名转拼音），发布表单用它预填 |
 | POST | `/api/v1/skills/validate` | 发布前干跑（只读）：闸门问题全量清单 + manifest + 体积 + 版本冲突 + 建议版本 |
+
+智能体面的 `validate` / `lookup` / `status` / `mine` 与技能面同构（共用 `market.rs` 的投影与校验），差异只有：智能体的名称来自包内 `manifest.json`，技能的名称来自发布请求的 `name`。
 
 发布请求体（`name` / `description` 以包内 `manifest.json` 为准，避免两处不一致）。
 `slug` 可省略：名称能转成 ASCII slug 就按名称推导（汉字按拼音，`周报助手` →
@@ -507,7 +512,7 @@ New Task 按钮正下方、折叠菜单之外；页面顶部三个一级页签�
 
 - 已交付：`agents` / `agent_versions` 表与迁移、`audit_log.kind`、
   `check_agent_bundle`（manifest/路径/技能 frontmatter）、发布/列表/我的/状态/下载/
-  撤回/恢复、管理端列表/下架/恢复、审计 `kind` 过滤、64 MiB 传输上限
+  撤回/恢复、管理端列表/下架/恢复、审计 `kind` 过滤、按路由的传输上限与请求超时
 - 未交付（按本轮决定后置）：独立额度、发布侧配置白名单强制校验、恶意内容策略
 - 测试：`cargo test` 24 单测 + 27 集成全绿（智能体新增 7 单测 + 8 集成）；
   `cargo clippy --all-targets -- -D warnings` 通过
