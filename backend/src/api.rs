@@ -41,7 +41,7 @@ pub async fn list_skills(
     let tenant = tenant.0;
     db::offload(&app, move |app| {
         let db = app.db();
-        market::list_page(&db, &market::SKILL, &tenant, &q, &app.cfg.public_url)
+        market::list_page(app, &db, &market::SKILL, &tenant, &q, &app.cfg.public_url)
     })
     .await
     .map(Json)
@@ -381,7 +381,7 @@ pub async fn fetch_bundle(
 ) -> ApiResult<Json<Value>> {
     db::offload(&app, move |app| {
         let db = app.db();
-        let payload = market::bundle(&db, &market::SKILL, &app.cfg, &tenant.0, &slug, &version)?;
+        let payload = market::bundle(app, &db, &market::SKILL, &tenant.0, &slug, &version)?;
         // A skill payload carries no description: the manifest is the contract.
         Ok(json!({
             "name": payload.name,

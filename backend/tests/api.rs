@@ -605,6 +605,54 @@ async fn lookup_maps_display_name_to_slug_even_after_takedown() {
     assert_eq!(body["items"].as_array().unwrap().len(), 0);
 }
 
+/// Download counts and the `last_seen` beacon accumulate in memory and reach
+/// SQLite in one batch: a fetch or a page of the market must not take the write
+/// lock, or a busy market serialises every install behind every listing.
+#[tokio::test]
+async fn counts_are_written_back_in_a_batch_not_per_fetch() {
+    let h = Harness::new();
+    h.publish_skill("tenant-a", "demo", "1.0.0", "public").await;
+
+    for _ in 0..3 {
+        let (status, _, _) = h
+            .call("GET", "/skills/demo/latest", Some("tenant-b"), None, None)
+            .await;
+        assert_eq!(status, StatusCode::OK);
+    }
+    let (status, _, _) = h
+        .call("GET", "/api/v1/skills", Some("tenant-b"), None, None)
+        .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // tenant-b only read; nothing it did has reached the database yet — not the
+    // counter, and not even a `tenants` row.
+    assert_eq!(h.stored_downloads("skills", "demo"), 0);
+    let known_tenants: i64 = h
+        .state
+        .db()
+        .query_row(
+            "SELECT COUNT(*) FROM tenants WHERE id = 'tenant-b'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(known_tenants, 0, "a listing GET must not insert a tenant row");
+
+    h.flush();
+
+    assert_eq!(h.stored_downloads("skills", "demo"), 3);
+    let last_seen: i64 = h
+        .state
+        .db()
+        .query_row(
+            "SELECT last_seen FROM tenants WHERE id = 'tenant-b'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(last_seen > 0, "the beacon must reach the database on flush");
+}
+
 #[tokio::test]
 async fn dashboard_counts_visible_active_items_and_keeps_download_history() {
     let h = Harness::new();
@@ -619,6 +667,9 @@ async fn dashboard_counts_visible_active_items_and_keeps_download_history() {
             .await;
         assert_eq!(status, StatusCode::OK);
     }
+
+    // Counts live in memory until the write-back task runs.
+    h.flush();
 
     let (status, stats, _) = h
         .call("GET", "/api/v1/stats", Some("tenant-b"), None, None)
@@ -671,6 +722,9 @@ async fn listing_reports_totals_and_whitelisted_sort_orders() {
         .call("GET", "/skills/gamma/1.0.0", Some("tenant-b"), None, None)
         .await;
     assert_eq!(status, StatusCode::OK);
+
+    // Counts live in memory until the write-back task runs.
+    h.flush();
 
     let (status, listing, _) = h
         .call(

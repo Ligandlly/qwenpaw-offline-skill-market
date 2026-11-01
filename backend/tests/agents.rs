@@ -596,6 +596,9 @@ async fn dashboard_counts_agents_and_their_downloads() {
         assert_eq!(status, StatusCode::OK);
     }
 
+    // Counts live in memory until the write-back task runs.
+    h.flush();
+
     let (status, stats, _) = h
         .call("GET", "/api/v1/stats", Some("tenant-b"), None, None)
         .await;
@@ -603,6 +606,7 @@ async fn dashboard_counts_agents_and_their_downloads() {
     assert_eq!(stats["agents"]["total"], 1);
     assert_eq!(stats["agents"]["new_this_month"], 1);
     assert_eq!(stats["agents"]["downloads"], 3);
+    assert_eq!(stats["skills"]["total"], 0);
     assert_eq!(stats["skills"]["total"], 0);
     assert_eq!(stats["totals"]["agents"], 1);
     assert_eq!(stats["totals"]["downloads"], 3);
@@ -638,6 +642,9 @@ async fn agent_listing_reports_totals_and_whitelisted_sort_orders() {
         )
         .await;
     assert_eq!(status, StatusCode::OK);
+
+    // Counts live in memory until the write-back task runs.
+    h.flush();
 
     let (status, listing, _) = h
         .call(

@@ -1,4 +1,4 @@
-use offline_market_backend::{admin, build_state, config::Config, db, log, router};
+use offline_market_backend::{admin, build_state, config::Config, counters, db, log, router};
 use tracing::info;
 
 #[tokio::main]
@@ -22,6 +22,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         admin::ensure_admin(&app);
     }
 
+    // Download counts and `last_seen` beacons accumulate in memory and land
+    // here; without this task they would never reach the database.
+    let (stopping, stop) = tokio::sync::watch::channel(false);
+    tokio::spawn(counters::flush_loop(app.clone(), stop));
+
     let listener = tokio::net::TcpListener::bind(&cfg.bind).await?;
     info!(
         bind = %cfg.bind,
@@ -36,9 +41,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         max_file_bytes = cfg.limits.max_file_bytes,
         "publish limits"
     );
-    axum::serve(listener, router(app))
+    axum::serve(listener, router(app.clone()))
         .with_graceful_shutdown(shutdown())
         .await?;
+
+    // The last batch must not wait for the next tick.
+    let _ = stopping.send(true);
+    if let Err(err) = counters::flush(&app) {
+        info!(code = err.code, "final counter flush failed");
+    }
     Ok(())
 }
 

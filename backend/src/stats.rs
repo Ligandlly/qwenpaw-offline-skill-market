@@ -3,8 +3,9 @@
 //! Counts mirror what the market listing shows this tenant: active public
 //! items plus its own active private ones. Takedown/withdrawn rows are
 //! excluded on purpose — the dashboard is a showcase, not an archive.
-//! `download_count` is incremented by the bundle handlers after a successful
-//! fetch, so it means "successful bundle downloads", not listing views.
+//! `download_count` counts successful bundle fetches, not listing views. The
+//! bundle handlers bump it in memory and `crate::counters` writes it back every
+//! few seconds, so the dashboard can lag by one interval.
 
 use axum::extract::State;
 use axum::Json;

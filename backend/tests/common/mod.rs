@@ -124,6 +124,25 @@ impl Harness {
         self.db().execute_batch(sql).expect("fixture sql");
     }
 
+    /// Applies the counters accumulated in memory, the way the background task
+    /// does every few seconds. Tests that read `download_count` or `last_seen`
+    /// call this instead of sleeping.
+    pub fn flush(&self) {
+        offline_market_backend::counters::flush(&self.state).expect("counter flush");
+    }
+
+    /// `download_count` as stored, without flushing: lets a test prove that a
+    /// fetch did *not* reach the database yet.
+    pub fn stored_downloads(&self, table: &str, slug: &str) -> i64 {
+        self.db()
+            .query_row(
+                &format!("SELECT download_count FROM {table} WHERE slug = ?1"),
+                [slug],
+                |row| row.get(0),
+            )
+            .expect("download_count")
+    }
+
     pub async fn call(
         &self,
         method: &str,

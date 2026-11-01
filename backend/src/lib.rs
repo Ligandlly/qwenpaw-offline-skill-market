@@ -12,6 +12,7 @@ pub mod agents;
 pub mod api;
 pub mod auth;
 pub mod config;
+pub mod counters;
 pub mod db;
 pub mod dto;
 pub mod error;
@@ -39,6 +40,7 @@ pub fn build_state(cfg: config::Config, conn: rusqlite::Connection) -> Shared {
         db: Mutex::new(conn),
         sessions: Mutex::new(Sessions::default()),
         logins: Mutex::new(auth::LoginLimiter::default()),
+        pending: Mutex::new(crate::counters::Pending::default()),
         cfg,
     })
 }

@@ -295,7 +295,7 @@ pub async fn list_agents(
     let tenant = tenant.0;
     db::offload(&app, move |app| {
         let db = app.db();
-        market::list_page(&db, &market::AGENT, &tenant, &q, &app.cfg.public_url)
+        market::list_page(app, &db, &market::AGENT, &tenant, &q, &app.cfg.public_url)
     })
     .await
     .map(Json)
@@ -619,7 +619,7 @@ pub async fn fetch_bundle(
 ) -> ApiResult<Json<Value>> {
     db::offload(&app, move |app| {
         let db = app.db();
-        let payload = market::bundle(&db, &market::AGENT, &app.cfg, &tenant.0, &slug, &version)?;
+        let payload = market::bundle(app, &db, &market::AGENT, &tenant.0, &slug, &version)?;
         Ok(json!({
             "name": payload.name,
             "description": payload.description,

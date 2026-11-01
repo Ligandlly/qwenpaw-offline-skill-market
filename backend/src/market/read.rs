@@ -7,30 +7,22 @@ use axum::http::StatusCode;
 
 use rusqlite::{params, Connection};
 use serde_json::{json, Value};
-use tracing::{debug, warn};
+use tracing::debug;
 
-use crate::config::Config;
-use crate::db::now;
 use crate::dto::{page_offset, ListQuery};
 use crate::error::{ApiError, ApiResult};
 use crate::limits::FileData;
+use crate::state::Shared;
 
 use super::entity::{normalize_sort, row_to_entry, Entry, Entity, Labels};
 
-/// Records that a tenant is alive. The market listing is the only place that
-/// observes traffic, so it doubles as the "last seen" beacon.
-pub(crate) fn touch_tenant(db: &Connection, tenant: &str) -> ApiResult<()> {
-    db.execute(
-        "INSERT INTO tenants (id, first_seen, last_seen) VALUES (?1, ?2, ?2)
-         ON CONFLICT(id) DO UPDATE SET last_seen = excluded.last_seen",
-        params![tenant, now()],
-    )
-    .map_err(ApiError::db)?;
-    Ok(())
-}
-
 /// `GET /api/v1/{skills,agents}`: one page of the market.
+///
+/// The listing is the only traffic this backend observes, so it also records
+/// the `last_seen` beacon — in memory, see `crate::counters`. A page of the
+/// market is therefore a pure read.
 pub(crate) fn list_page(
+    app: &Shared,
     db: &Connection,
     entity: &Entity,
     tenant: &str,
@@ -43,7 +35,7 @@ pub(crate) fn list_page(
     let order = (entity.order)(&query.sort);
     let alias = entity.alias;
 
-    touch_tenant(db, tenant)?;
+    app.pending().touch(tenant);
 
     let filter = format!(
         "{alias}.takedown_at IS NULL AND {alias}.withdrawn_at IS NULL
@@ -211,9 +203,9 @@ pub(crate) struct BundlePayload {
 /// and an unknown slug is 410 rather than 404 so a removed entry reads the
 /// same as one that never existed.
 pub(crate) fn bundle(
+    app: &Shared,
     db: &Connection,
     entity: &Entity,
-    cfg: &Config,
     tenant: &str,
     slug: &str,
     version: &str,
@@ -299,13 +291,9 @@ pub(crate) fn bundle(
 
     let (name, description) = labels_of(entity, &files, &row_name)?;
 
-    if let Err(err) = db.execute(
-        &format!("UPDATE {} SET download_count = download_count + 1 WHERE slug = ?1", entity.table),
-        params![slug],
-    ) {
-        // A counter must never fail an install that already succeeded.
-        warn!(slug = %slug, error = %err, "download counter update failed");
-    }
+    // Counted in memory and written back by `crate::counters`: a download must
+    // not need the write lock, and must never fail because of its counter.
+    app.pending().add_download(entity.table, slug);
 
     debug!(
         tenant = %tenant,
@@ -318,7 +306,7 @@ pub(crate) fn bundle(
     Ok(BundlePayload {
         name,
         description,
-        source_url: (entity.bundle_url)(&cfg.public_url, slug, &resolved),
+        source_url: (entity.bundle_url)(&app.cfg.public_url, slug, &resolved),
         version: resolved,
         files,
     })
