@@ -97,7 +97,8 @@ pub const SKILL: Entity = Entity {
     kind: crate::db::AUDIT_SKILL,
     label: "技能",
     select: SKILL_SELECT,
-    select_lifecycle: "SELECT owner_tenant, latest_version, takedown_at FROM skills WHERE slug = ?1",
+    select_lifecycle:
+        "SELECT owner_tenant, latest_version, takedown_at FROM skills WHERE slug = ?1",
     insert_listing: "INSERT INTO skills
            (slug, name, owner_tenant, visibility, latest_version, created_at)
          VALUES (:slug, :name, :owner, :visibility, :version, :now)
@@ -120,7 +121,8 @@ pub const AGENT: Entity = Entity {
     kind: crate::db::AUDIT_AGENT,
     label: "智能体",
     select: AGENT_SELECT,
-    select_lifecycle: "SELECT owner_tenant, latest_version, takedown_at FROM agents WHERE slug = ?1",
+    select_lifecycle:
+        "SELECT owner_tenant, latest_version, takedown_at FROM agents WHERE slug = ?1",
     insert_listing: "INSERT INTO agents
            (slug, name, description, owner_tenant, visibility, latest_version, created_at)
          VALUES (:slug, :name, :description, :owner, :visibility, :version, :now)
@@ -222,10 +224,7 @@ impl Entry {
             Ok(Value::Object(fields)) => fields,
             _ => serde_json::Map::new(),
         };
-        fields.insert(
-            entity.bundle_field.to_string(),
-            json!(self.bundle_url),
-        );
+        fields.insert(entity.bundle_field.to_string(), json!(self.bundle_url));
         Value::Object(fields)
     }
 }
@@ -272,4 +271,3 @@ pub(crate) fn row_to_entry(
         bundle_url,
     })
 }
-

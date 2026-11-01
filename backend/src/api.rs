@@ -15,9 +15,9 @@ use tracing::{debug, error, info, warn};
 
 use crate::auth::TenantId;
 use crate::db;
-use crate::http;
 use crate::dto::{default_visibility, ListQuery, LookupQuery};
 use crate::error::{ApiError, ApiResult};
+use crate::http;
 use crate::limits::{self, FileData, MANIFEST};
 use crate::market;
 use crate::slug::{clean_publisher_name, derive_slug};
@@ -119,7 +119,13 @@ pub async fn lookup_skills(
     let tenant = tenant.0;
     db::offload(&app, move |app| {
         let db = app.db();
-        market::lookup(&db, &market::SKILL, &tenant, &query.names, &app.cfg.public_url)
+        market::lookup(
+            &db,
+            &market::SKILL,
+            &tenant,
+            &query.names,
+            &app.cfg.public_url,
+        )
     })
     .await
     .map(Json)
@@ -273,11 +279,7 @@ pub async fn validate(
         .map(Json)
 }
 
-fn validate_sync(
-    app: &Shared,
-    tenant: &TenantId,
-    body: PublishRequest,
-) -> ApiResult<Value> {
+fn validate_sync(app: &Shared, tenant: &TenantId, body: PublishRequest) -> ApiResult<Value> {
     let mut problems: Vec<market::Problem> = Vec::new();
     market::check_fields(&body.version, &body.visibility, &mut problems);
     let slug = market::resolve_slug(
@@ -297,7 +299,14 @@ fn validate_sync(
     let (existing, next_version) = match slug.as_deref().filter(|slug| limits::valid_slug(slug)) {
         Some(slug) => {
             let db = app.db();
-            market::inspect(&db, &market::SKILL, &tenant.0, slug, &body.version, &mut problems)?
+            market::inspect(
+                &db,
+                &market::SKILL,
+                &tenant.0,
+                slug,
+                &body.version,
+                &mut problems,
+            )?
         }
         None => (None, None),
     };
@@ -372,7 +381,13 @@ pub async fn restore(
             "只有发布者所在团队才能重新上架",
             "该技能由管理员下架，不能自行恢复上架",
         )?;
-        market::change_state(&db, &market::SKILL, &slug, market::Change::Restore, &tenant.actor())
+        market::change_state(
+            &db,
+            &market::SKILL,
+            &slug,
+            market::Change::Restore,
+            &tenant.actor(),
+        )
     })
     .await
     .map(Json)
@@ -401,10 +416,14 @@ pub async fn fetch_bundle(
             "files": payload.files,
             "source_url": payload.source_url,
         });
-        http::immutable_json(&body, &payload.sha256, payload.visibility == "public", &headers)
+        http::immutable_json(
+            &body,
+            &payload.sha256,
+            payload.visibility == "public",
+            &headers,
+        )
     })
     .await
 }
 
 // ------------------------------------------------------------------ helpers ---
-

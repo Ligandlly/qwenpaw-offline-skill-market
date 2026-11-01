@@ -177,7 +177,11 @@ mod tests {
         for (i, lower) in train.iter().enumerate() {
             for higher in &train[i + 1..] {
                 assert_eq!(compare_versions(lower, higher), Less, "{lower} < {higher}");
-                assert_eq!(compare_versions(higher, lower), Greater, "{higher} > {lower}");
+                assert_eq!(
+                    compare_versions(higher, lower),
+                    Greater,
+                    "{higher} > {lower}"
+                );
             }
             assert_eq!(compare_versions(lower, lower), Equal, "{lower} == {lower}");
         }

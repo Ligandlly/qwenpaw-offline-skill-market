@@ -1,8 +1,8 @@
 //! How an entry gets its identifier: pinyin for Chinese display names, an
 //! ascii-safe fallback, and the publisher alias that rides along with it.
 
-use rusqlite::params;
 use pinyin::ToPinyin;
+use rusqlite::params;
 use sha2::{Digest, Sha256};
 
 use crate::limits;

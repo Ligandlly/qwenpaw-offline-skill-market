@@ -16,14 +16,14 @@ use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use tracing::{debug, error, info, warn};
 
-use crate::slug::clean_publisher_name;
-use crate::dto::{default_visibility, fifty, ListQuery, LookupQuery};
-use crate::db;
-use crate::http;
-use crate::error::{ApiError, ApiResult};
 use crate::auth::{Admin, TenantId};
+use crate::db;
+use crate::dto::{default_visibility, fifty, ListQuery, LookupQuery};
+use crate::error::{ApiError, ApiResult};
+use crate::http;
 use crate::limits::{self, FileData, Reject};
 use crate::market;
+use crate::slug::clean_publisher_name;
 use crate::state::Shared;
 
 pub const AGENT_MANIFEST: &str = "manifest.json";
@@ -323,7 +323,13 @@ pub async fn lookup_agents(
     let tenant = tenant.0;
     db::offload(&app, move |app| {
         let db = app.db();
-        market::lookup(&db, &market::AGENT, &tenant, &query.names, &app.cfg.public_url)
+        market::lookup(
+            &db,
+            &market::AGENT,
+            &tenant,
+            &query.names,
+            &app.cfg.public_url,
+        )
     })
     .await
     .map(Json)
@@ -381,7 +387,14 @@ fn validate_sync(app: &Shared, tenant: &TenantId, body: PublishRequest) -> ApiRe
     let (existing, next_version) = match slug.as_deref().filter(|slug| limits::valid_slug(slug)) {
         Some(slug) => {
             let db = app.db();
-            market::inspect(&db, &market::AGENT, &tenant.0, slug, &body.version, &mut problems)?
+            market::inspect(
+                &db,
+                &market::AGENT,
+                &tenant.0,
+                slug,
+                &body.version,
+                &mut problems,
+            )?
         }
         None => (None, None),
     };
@@ -472,13 +485,7 @@ fn publish_sync(
     let description = checked.manifest.description.trim().to_string();
     // The name lives in the bundle, so the gate runs before the slug can be
     // derived from it.
-    let slug = market::required_slug(
-        &market::AGENT,
-        app,
-        &tenant.0,
-        &name,
-        body.slug.as_deref(),
-    )?;
+    let slug = market::required_slug(&market::AGENT, app, &tenant.0, &name, body.slug.as_deref())?;
 
     let db = app.db();
     let actor = tenant.actor();
@@ -606,7 +613,13 @@ pub async fn restore(
             "只有发布者所在团队才能重新上架",
             "该智能体由管理员下架，不能自行恢复上架",
         )?;
-        market::change_state(&db, &market::AGENT, &slug, market::Change::Restore, &tenant.actor())
+        market::change_state(
+            &db,
+            &market::AGENT,
+            &slug,
+            market::Change::Restore,
+            &tenant.actor(),
+        )
     })
     .await
     .map(Json)
@@ -634,7 +647,12 @@ pub async fn fetch_bundle(
             "files": payload.files,
             "source_url": payload.source_url,
         });
-        http::immutable_json(&body, &payload.sha256, payload.visibility == "public", &headers)
+        http::immutable_json(
+            &body,
+            &payload.sha256,
+            payload.visibility == "public",
+            &headers,
+        )
     })
     .await
 }
@@ -697,7 +715,13 @@ pub async fn admin_restore(
 ) -> ApiResult<Json<Value>> {
     db::offload(&app, move |app| {
         let db = app.db();
-        market::change_state(&db, &market::AGENT, &slug, market::Change::Lift, &admin.actor())
+        market::change_state(
+            &db,
+            &market::AGENT,
+            &slug,
+            market::Change::Lift,
+            &admin.actor(),
+        )
     })
     .await
     .map(Json)

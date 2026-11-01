@@ -18,7 +18,9 @@ use tower::ServiceExt;
 fn binary_bundle(files: usize, bytes: usize) -> Value {
     let mut bundle = serde_json::Map::new();
     for index in 0..files {
-        let payload: Vec<u8> = (0..bytes).map(|offset| (offset % 251) as u8 | 0x80).collect();
+        let payload: Vec<u8> = (0..bytes)
+            .map(|offset| (offset % 251) as u8 | 0x80)
+            .collect();
         bundle.insert(
             format!("assets/{index}.bin"),
             json!({ "base64": Base64::encode_string(&payload) }),
@@ -138,7 +140,9 @@ async fn bundle_responses_revalidate_on_their_digest() {
     let (status, body) = h.publish_skill("tenant-a", "demo", "1.0.0", "public").await;
     assert_eq!(status, StatusCode::CREATED, "{body}");
 
-    let (status, headers, bytes) = h.call_headers("/skills/demo/1.0.0", Some("tenant-b"), &[]).await;
+    let (status, headers, bytes) = h
+        .call_headers("/skills/demo/1.0.0", Some("tenant-b"), &[])
+        .await;
     assert_eq!(status, StatusCode::OK);
     let etag = headers
         .get("etag")
@@ -157,7 +161,11 @@ async fn bundle_responses_revalidate_on_their_digest() {
 
     // The client that already has it asks again and pays for headers only.
     let (status, headers, bytes) = h
-        .call_headers("/skills/demo/1.0.0", Some("tenant-b"), &[("if-none-match", &etag)])
+        .call_headers(
+            "/skills/demo/1.0.0",
+            Some("tenant-b"),
+            &[("if-none-match", &etag)],
+        )
         .await;
     assert_eq!(status, StatusCode::NOT_MODIFIED);
     assert!(bytes.is_empty(), "a 304 must not carry a body");
@@ -185,9 +193,13 @@ async fn bundle_responses_revalidate_on_their_digest() {
     assert_eq!(h.stored_downloads("skills", "demo"), 2);
 
     // A tenant-private bundle must never reach a shared cache.
-    let (status, body) = h.publish_skill("tenant-a", "other", "1.0.0", "tenant").await;
+    let (status, body) = h
+        .publish_skill("tenant-a", "other", "1.0.0", "tenant")
+        .await;
     assert_eq!(status, StatusCode::CREATED, "{body}");
-    let (status, headers, _) = h.call_headers("/skills/other/1.0.0", Some("tenant-a"), &[]).await;
+    let (status, headers, _) = h
+        .call_headers("/skills/other/1.0.0", Some("tenant-a"), &[])
+        .await;
     assert_eq!(status, StatusCode::OK);
     let cache_control = headers
         .get("cache-control")
@@ -223,9 +235,14 @@ async fn big_bundles_are_compressed_for_clients_that_ask() {
         .await;
     assert_eq!(status, StatusCode::CREATED, "{body}");
 
-    let (status, headers, plain) = h.call_headers("/skills/demo/1.0.0", Some("tenant-b"), &[]).await;
+    let (status, headers, plain) = h
+        .call_headers("/skills/demo/1.0.0", Some("tenant-b"), &[])
+        .await;
     assert_eq!(status, StatusCode::OK);
-    assert!(headers.get("content-encoding").is_none(), "compression was not asked for");
+    assert!(
+        headers.get("content-encoding").is_none(),
+        "compression was not asked for"
+    );
 
     let (status, headers, gzipped) = h
         .call_headers(
@@ -282,12 +299,20 @@ async fn health_reports_a_broken_database() {
 
     h.exec("ALTER TABLE tenants RENAME TO tenants_gone");
     let (status, _, bytes) = h.call_headers("/health", None, &[]).await;
-    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "a broken schema must fail");
+    assert_eq!(
+        status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "a broken schema must fail"
+    );
     let body: Value = serde_json::from_slice(&bytes).expect("health json");
     assert_eq!(body["status"], "degraded", "{body}");
     assert_eq!(body["database"], "error", "{body}");
 
     h.exec("ALTER TABLE tenants_gone RENAME TO tenants");
     let (status, _, _) = h.call_headers("/health", None, &[]).await;
-    assert_eq!(status, StatusCode::OK, "health must recover with the database");
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "health must recover with the database"
+    );
 }

@@ -1,8 +1,8 @@
 //! Shared application state.
 
 use crate::auth::{LoginLimiter, Sessions};
-use crate::counters::Pending;
 use crate::config::Config;
+use crate::counters::Pending;
 use rusqlite::Connection;
 use std::sync::{Arc, Mutex, MutexGuard};
 

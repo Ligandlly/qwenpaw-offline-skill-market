@@ -113,7 +113,10 @@ INSERT INTO agent_versions (slug, version, sha256, size_bytes, file_count, skill
 fn a_fresh_database_is_stamped_with_the_current_version() {
     let path = temp_db("fresh");
     let conn = offline_market_backend::db::open(&path).expect("open a fresh database");
-    assert_eq!(user_version(&conn), offline_market_backend::db::SCHEMA_VERSION);
+    assert_eq!(
+        user_version(&conn),
+        offline_market_backend::db::SCHEMA_VERSION
+    );
     let _ = std::fs::remove_dir_all(path.parent().unwrap());
 }
 
@@ -123,7 +126,10 @@ fn an_old_database_gets_the_new_columns_and_no_loss() {
     old_market(&path);
 
     let conn = offline_market_backend::db::open(&path).expect("upgrade the old database");
-    assert_eq!(user_version(&conn), offline_market_backend::db::SCHEMA_VERSION);
+    assert_eq!(
+        user_version(&conn),
+        offline_market_backend::db::SCHEMA_VERSION
+    );
 
     // The published row survives, and the listing columns are derived from the
     // rows that were already there.
@@ -176,9 +182,11 @@ fn the_upgrade_runs_once_per_database() {
     // whatever the running market has since computed.
     let conn = offline_market_backend::db::open(&path).expect("second open");
     let versions: i64 = conn
-        .query_row("SELECT version_count FROM skills WHERE slug = 'demo'", [], |row| {
-            row.get(0)
-        })
+        .query_row(
+            "SELECT version_count FROM skills WHERE slug = 'demo'",
+            [],
+            |row| row.get(0),
+        )
         .expect("the skill row");
     assert_eq!(versions, 42);
     let _ = std::fs::remove_dir_all(path.parent().unwrap());

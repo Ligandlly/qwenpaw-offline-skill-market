@@ -35,10 +35,7 @@ pub struct Pending {
 impl Pending {
     /// Counts one successful bundle fetch. Memory only: see the module docs.
     pub fn add_download(&mut self, table: &'static str, slug: &str) {
-        *self
-            .downloads
-            .entry((table, slug.to_string()))
-            .or_insert(0) += 1;
+        *self.downloads.entry((table, slug.to_string())).or_insert(0) += 1;
     }
 
     /// The market listing is the only traffic the backend observes, so it
@@ -155,4 +152,3 @@ fn flush_quietly(app: &Shared, why: &str) {
         ),
     }
 }
-

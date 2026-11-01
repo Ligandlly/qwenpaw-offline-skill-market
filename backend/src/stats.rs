@@ -12,9 +12,9 @@ use axum::Json;
 use rusqlite::{params, Connection};
 use serde_json::{json, Value};
 
-use crate::error::{ApiError, ApiResult};
 use crate::auth::TenantId;
 use crate::db::now;
+use crate::error::{ApiError, ApiResult};
 use crate::state::Shared;
 
 pub async fn overview(State(app): State<Shared>, tenant: TenantId) -> ApiResult<Json<Value>> {

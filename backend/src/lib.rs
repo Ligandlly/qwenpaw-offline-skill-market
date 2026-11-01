@@ -21,9 +21,9 @@ pub mod limits;
 pub mod log;
 pub mod market;
 pub mod slug;
-pub mod version;
 pub mod state;
 pub mod stats;
+pub mod version;
 
 use axum::extract::{DefaultBodyLimit, Request, State};
 use axum::http::StatusCode;
@@ -55,9 +55,7 @@ pub fn router(app: Shared) -> Router {
         .route("/api/v1/stats", get(stats::overview))
         .route(
             "/api/v1/skills",
-            get(api::list_skills)
-                .post(api::publish)
-                .layer(bundle_limit),
+            get(api::list_skills).post(api::publish).layer(bundle_limit),
         )
         .route("/api/v1/skills/mine", get(api::list_mine))
         .route("/api/v1/skills/lookup", get(api::lookup_skills))
@@ -148,11 +146,7 @@ const SMALL_BODY_LIMIT: usize = 8 * 1024;
 
 /// Give every request a deadline, so a stalled handler cannot pin a connection
 /// and a worker thread for the rest of the process lifetime.
-pub async fn budget_request(
-    State(app): State<Shared>,
-    request: Request,
-    next: Next,
-) -> Response {
+pub async fn budget_request(State(app): State<Shared>, request: Request, next: Next) -> Response {
     match tokio::time::timeout(app.cfg.request_timeout, next.run(request)).await {
         Ok(response) => response,
         Err(_) => error::ApiError::new(

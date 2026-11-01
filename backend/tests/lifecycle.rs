@@ -138,7 +138,13 @@ impl Kind {
 
     async fn status_of(self, h: &Harness, tenant: &str, slug: &str) -> (StatusCode, Value) {
         let (status, body, _) = h
-            .call("GET", &self.action(slug, "status"), Some(tenant), None, None)
+            .call(
+                "GET",
+                &self.action(slug, "status"),
+                Some(tenant),
+                None,
+                None,
+            )
             .await;
         (status, body)
     }
@@ -194,19 +200,32 @@ async fn the_listing_follows_the_newest_version_not_the_last_publish() {
         // An older version arrives late with another name: the listing must not
         // follow it backwards, but the request's visibility does apply.
         publish_as(kind, &h, relabel(kind, "Older", "1.5.0", "tenant")).await;
-        let (_, listing, _) = h.call("GET", kind.list(), Some("tenant-a"), None, None).await;
+        let (_, listing, _) = h
+            .call("GET", kind.list(), Some("tenant-a"), None, None)
+            .await;
         let item = find(&listing, "alpha");
-        assert_eq!(item["name"], "Newest", "{kind:?} listing followed an old publish");
+        assert_eq!(
+            item["name"], "Newest",
+            "{kind:?} listing followed an old publish"
+        );
         assert_eq!(item["latest_version"], "2.0.0", "{kind:?}");
         assert_eq!(item["visibility"], "tenant", "{kind:?}");
 
         // Which means another team no longer sees it at all.
-        let (_, other, _) = h.call("GET", kind.list(), Some("tenant-b"), None, None).await;
-        assert_eq!(slugs(&other), Vec::<String>::new(), "{kind:?} leaked a tenant entry");
+        let (_, other, _) = h
+            .call("GET", kind.list(), Some("tenant-b"), None, None)
+            .await;
+        assert_eq!(
+            slugs(&other),
+            Vec::<String>::new(),
+            "{kind:?} leaked a tenant entry"
+        );
 
         // Forward again: the listing takes the new name and the new visibility.
         publish_as(kind, &h, relabel(kind, "Newer", "2.1.0", "public")).await;
-        let (_, listing, _) = h.call("GET", kind.list(), Some("tenant-b"), None, None).await;
+        let (_, listing, _) = h
+            .call("GET", kind.list(), Some("tenant-b"), None, None)
+            .await;
         let item = find(&listing, "alpha");
         assert_eq!(item["name"], "Newer", "{kind:?}");
         assert_eq!(item["latest_version"], "2.1.0", "{kind:?}");
@@ -226,7 +245,9 @@ async fn listing_summary_tracks_the_version_history() {
             .await;
         assert_eq!(status, StatusCode::CREATED, "{kind:?}: {body}");
 
-        let (_, listing, _) = h.call("GET", kind.list(), Some("tenant-a"), None, None).await;
+        let (_, listing, _) = h
+            .call("GET", kind.list(), Some("tenant-a"), None, None)
+            .await;
         let item = find(&listing, "alpha");
         let one_version = item["size_bytes"].as_i64().expect("size_bytes");
         assert!(one_version > 0, "{kind:?}: {item}");
@@ -240,7 +261,9 @@ async fn listing_summary_tracks_the_version_history() {
             .await;
         assert_eq!(status, StatusCode::CREATED, "{kind:?}: {body}");
 
-        let (_, listing, _) = h.call("GET", kind.list(), Some("tenant-a"), None, None).await;
+        let (_, listing, _) = h
+            .call("GET", kind.list(), Some("tenant-a"), None, None)
+            .await;
         let item = find(&listing, "alpha");
         assert_eq!(item["versions"], 2, "{kind:?}: {item}");
         assert_eq!(
@@ -262,7 +285,9 @@ async fn listing_summary_tracks_the_version_history() {
             .publish_with(&h, "tenant-a", "alpha", "1.0.0", "public", "alpha")
             .await;
         assert_eq!(status, StatusCode::CONFLICT, "{kind:?}");
-        let (_, listing, _) = h.call("GET", kind.list(), Some("tenant-a"), None, None).await;
+        let (_, listing, _) = h
+            .call("GET", kind.list(), Some("tenant-a"), None, None)
+            .await;
         let item = find(&listing, "alpha");
         assert_eq!(item["versions"], 2, "{kind:?}: {item}");
         assert_eq!(
@@ -281,7 +306,9 @@ async fn a_published_version_is_immutable() {
             .publish_with(&h, "tenant-a", "alpha", "1.0.0", "public", "first")
             .await;
         assert_eq!(status, StatusCode::CREATED, "{kind:?}: {body}");
-        let (status, first, ) = h.download(&kind.bundle("alpha", "1.0.0"), Some("tenant-b")).await;
+        let (status, first) = h
+            .download(&kind.bundle("alpha", "1.0.0"), Some("tenant-b"))
+            .await;
         assert_eq!(status, StatusCode::OK, "{kind:?}");
 
         // A second version is accepted and becomes latest.
@@ -293,27 +320,37 @@ async fn a_published_version_is_immutable() {
 
         // ... and the old one still serves exactly the bytes it was published
         // with: a version is a fact, not a mutable row.
-        let (status, again) = h.download(&kind.bundle("alpha", "1.0.0"), Some("tenant-b")).await;
+        let (status, again) = h
+            .download(&kind.bundle("alpha", "1.0.0"), Some("tenant-b"))
+            .await;
         assert_eq!(status, StatusCode::OK, "{kind:?}");
         assert_same_bundle(&first, &again);
         let bundle: Value = serde_json::from_slice(&first).unwrap();
         assert!(
-            bundle["files"].get("SKILL.md").is_none_or(|v| v
-                .as_str()
-                .is_some_and(|s| !s.contains("second"))),
+            bundle["files"]
+                .get("SKILL.md")
+                .is_none_or(|v| v.as_str().is_some_and(|s| !s.contains("second"))),
             "{kind:?} 1.0.0 was rewritten: {bundle}"
         );
 
         // Each version describes itself: 1.1.0's manifest marker is "second",
         // 1.0.0's stays "first" — the payload is not read from the listing row.
-        let (status, latest) = h.download(&kind.bundle("alpha", "1.1.0"), Some("tenant-b")).await;
+        let (status, latest) = h
+            .download(&kind.bundle("alpha", "1.1.0"), Some("tenant-b"))
+            .await;
         assert_eq!(status, StatusCode::OK, "{kind:?}");
         let latest: Value = serde_json::from_slice(&latest).unwrap();
         let described = match kind {
-            Kind::Skill => latest["files"]["SKILL.md"].as_str().unwrap().contains("second"),
+            Kind::Skill => latest["files"]["SKILL.md"]
+                .as_str()
+                .unwrap()
+                .contains("second"),
             Kind::Agent => latest["description"] == "second",
         };
-        assert!(described, "{kind:?} 1.1.0 does not carry its own manifest: {latest}");
+        assert!(
+            described,
+            "{kind:?} 1.1.0 does not carry its own manifest: {latest}"
+        );
 
         // Re-publishing a taken version is rejected, and rejection must not
         // mutate anything: the API is a rollback, not a partial write.
@@ -328,7 +365,10 @@ async fn a_published_version_is_immutable() {
             .await;
         assert_eq!(status, StatusCode::OK, "{kind:?}");
         let item = find(&listing, "alpha");
-        assert_eq!(item["versions"], 2, "{kind:?} rejected publish added a version");
+        assert_eq!(
+            item["versions"], 2,
+            "{kind:?} rejected publish added a version"
+        );
         assert_eq!(item["latest_version"], "1.1.0", "{kind:?}");
         assert_eq!(
             item["visibility"], "public",
@@ -340,7 +380,9 @@ async fn a_published_version_is_immutable() {
             item["name"]
         );
 
-        let (status, kept) = h.download(&kind.bundle("alpha", "1.0.0"), Some("tenant-b")).await;
+        let (status, kept) = h
+            .download(&kind.bundle("alpha", "1.0.0"), Some("tenant-b"))
+            .await;
         assert_eq!(status, StatusCode::OK, "{kind:?}");
         assert_same_bundle(&first, &kept);
     }
@@ -350,7 +392,8 @@ async fn a_published_version_is_immutable() {
 async fn latest_never_rolls_back_and_a_publish_revives_a_withdrawal() {
     for kind in Kind::ALL {
         let h = Harness::new();
-        kind.publish(&h, "tenant-a", "alpha", "2.0.0", "public").await;
+        kind.publish(&h, "tenant-a", "alpha", "2.0.0", "public")
+            .await;
 
         // A late publish of an older version is stored but must not move
         // `latest` backwards — the market never "downgrades" by accident.
@@ -402,21 +445,28 @@ async fn latest_never_rolls_back_and_a_publish_revives_a_withdrawal() {
 async fn a_slug_belongs_to_its_first_team() {
     for kind in Kind::ALL {
         let h = Harness::new();
-        kind.publish(&h, "tenant-a", "alpha", "1.0.0", "public").await;
+        kind.publish(&h, "tenant-a", "alpha", "1.0.0", "public")
+            .await;
 
         // Another team cannot publish into an existing slug, at any version.
-        let (status, body) = kind.publish(&h, "tenant-b", "alpha", "1.0.0", "public").await;
+        let (status, body) = kind
+            .publish(&h, "tenant-b", "alpha", "1.0.0", "public")
+            .await;
         assert_eq!(status, StatusCode::FORBIDDEN, "{kind:?}: {body}");
         assert_eq!(body["error"]["code"], "forbidden", "{kind:?}: {body}");
 
-        let (status, body) = kind.publish(&h, "tenant-b", "alpha", "2.0.0", "public").await;
+        let (status, body) = kind
+            .publish(&h, "tenant-b", "alpha", "2.0.0", "public")
+            .await;
         assert_eq!(status, StatusCode::FORBIDDEN, "{kind:?}: {body}");
         assert_eq!(body["error"]["code"], "forbidden", "{kind:?}: {body}");
 
         // A takedown does not release the slug either.
         let (status, body) = kind.admin(&h, "alpha", "takedown").await;
         assert_eq!(status, StatusCode::OK, "{kind:?}: {body}");
-        let (status, body) = kind.publish(&h, "tenant-b", "alpha", "1.0.0", "public").await;
+        let (status, body) = kind
+            .publish(&h, "tenant-b", "alpha", "1.0.0", "public")
+            .await;
         assert_eq!(status, StatusCode::FORBIDDEN, "{kind:?}: {body}");
         assert_eq!(body["error"]["code"], "forbidden", "{kind:?}: {body}");
     }
@@ -430,7 +480,8 @@ async fn a_slug_belongs_to_its_first_team() {
 async fn withdraw_and_restore_are_idempotent_and_owner_only() {
     for kind in Kind::ALL {
         let h = Harness::new();
-        kind.publish(&h, "tenant-a", "alpha", "1.0.0", "public").await;
+        kind.publish(&h, "tenant-a", "alpha", "1.0.0", "public")
+            .await;
 
         // Not the owner: rejected, and nothing changes.
         let (status, body, _) = h
@@ -468,7 +519,9 @@ async fn withdraw_and_restore_are_idempotent_and_owner_only() {
             .await;
         assert_eq!(listing["total"], 0, "{kind:?} withdrawn item still listed");
         // The owner keeps access to its own withdrawn entry.
-        let (status, _) = h.download(&kind.bundle("alpha", "1.0.0"), Some("tenant-a")).await;
+        let (status, _) = h
+            .download(&kind.bundle("alpha", "1.0.0"), Some("tenant-a"))
+            .await;
         assert_eq!(status, StatusCode::OK, "{kind:?}");
 
         // Restore, twice.
@@ -515,7 +568,8 @@ async fn withdraw_and_restore_are_idempotent_and_owner_only() {
 async fn a_takedown_outranks_the_owner() {
     for kind in Kind::ALL {
         let h = Harness::new();
-        kind.publish(&h, "tenant-a", "alpha", "1.0.0", "public").await;
+        kind.publish(&h, "tenant-a", "alpha", "1.0.0", "public")
+            .await;
 
         let (status, body) = kind.admin(&h, "alpha", "takedown").await;
         assert_eq!(status, StatusCode::OK, "{kind:?}: {body}");
@@ -524,12 +578,21 @@ async fn a_takedown_outranks_the_owner() {
         // The reason is visible to the owner through the status probe.
         let (_, status_body) = kind.status_of(&h, "tenant-a", "alpha").await;
         assert_eq!(status_body["state"], "taken_down", "{kind:?}");
-        assert_eq!(status_body["takedown_reason"], "policy violation", "{kind:?}");
+        assert_eq!(
+            status_body["takedown_reason"], "policy violation",
+            "{kind:?}"
+        );
 
         // Nobody can serve, revive or re-publish a taken-down entry — not even
         // its owner, not even with a brand new version.
-        let (status, _) = h.download(&kind.bundle("alpha", "1.0.0"), Some("tenant-a")).await;
-        assert_eq!(status, StatusCode::GONE, "{kind:?} served a taken-down bundle");
+        let (status, _) = h
+            .download(&kind.bundle("alpha", "1.0.0"), Some("tenant-a"))
+            .await;
+        assert_eq!(
+            status,
+            StatusCode::GONE,
+            "{kind:?} served a taken-down bundle"
+        );
         for action in ["withdraw", "restore"] {
             let (status, body, _) = h
                 .call(
@@ -543,7 +606,9 @@ async fn a_takedown_outranks_the_owner() {
             assert_eq!(status, StatusCode::CONFLICT, "{kind:?} {action}: {body}");
             assert_eq!(body["error"]["code"], "taken_down", "{kind:?} {action}");
         }
-        let (status, body) = kind.publish(&h, "tenant-a", "alpha", "2.0.0", "public").await;
+        let (status, body) = kind
+            .publish(&h, "tenant-a", "alpha", "2.0.0", "public")
+            .await;
         assert_eq!(status, StatusCode::CONFLICT, "{kind:?}: {body}");
         assert_eq!(body["error"]["code"], "taken_down", "{kind:?}");
 
@@ -551,7 +616,9 @@ async fn a_takedown_outranks_the_owner() {
         let (status, body) = kind.admin(&h, "alpha", "restore").await;
         assert_eq!(status, StatusCode::OK, "{kind:?}: {body}");
         assert_eq!(body["state"], "active", "{kind:?}");
-        let (status, _) = h.download(&kind.bundle("alpha", "1.0.0"), Some("tenant-b")).await;
+        let (status, _) = h
+            .download(&kind.bundle("alpha", "1.0.0"), Some("tenant-b"))
+            .await;
         assert_eq!(status, StatusCode::OK, "{kind:?} not serving again");
 
         // The owner's own restore still works afterwards (nothing left over).
@@ -576,10 +643,14 @@ async fn a_takedown_outranks_the_owner() {
 async fn admin_listing_sees_every_state() {
     for kind in Kind::ALL {
         let h = Harness::new();
-        kind.publish(&h, "tenant-a", "active", "1.0.0", "public").await;
-        kind.publish(&h, "tenant-a", "hidden", "1.0.0", "tenant").await;
-        kind.publish(&h, "tenant-a", "retired", "1.0.0", "public").await;
-        kind.publish(&h, "tenant-a", "banned", "1.0.0", "public").await;
+        kind.publish(&h, "tenant-a", "active", "1.0.0", "public")
+            .await;
+        kind.publish(&h, "tenant-a", "hidden", "1.0.0", "tenant")
+            .await;
+        kind.publish(&h, "tenant-a", "retired", "1.0.0", "public")
+            .await;
+        kind.publish(&h, "tenant-a", "banned", "1.0.0", "public")
+            .await;
         h.call(
             "POST",
             &kind.action("retired", "withdraw"),
@@ -592,7 +663,13 @@ async fn admin_listing_sees_every_state() {
 
         let cookie = h.login().await;
         let (status, body, _) = h
-            .call("GET", &format!("/admin/api/{}", kind.table()), None, None, Some(&cookie))
+            .call(
+                "GET",
+                &format!("/admin/api/{}", kind.table()),
+                None,
+                None,
+                Some(&cookie),
+            )
             .await;
         assert_eq!(status, StatusCode::OK, "{kind:?}: {body}");
         assert_eq!(
@@ -618,11 +695,21 @@ async fn admin_listing_sees_every_state() {
                 Some(&cookie),
             )
             .await;
-        assert_eq!(slugs(&filtered), ["retired"], "{kind:?} q filter: {filtered}");
+        assert_eq!(
+            slugs(&filtered),
+            ["retired"],
+            "{kind:?} q filter: {filtered}"
+        );
 
         // Without an admin cookie: no listing at all.
         let (status, _, _) = h
-            .call("GET", &format!("/admin/api/{}", kind.table()), None, None, None)
+            .call(
+                "GET",
+                &format!("/admin/api/{}", kind.table()),
+                None,
+                None,
+                None,
+            )
             .await;
         assert_eq!(status, StatusCode::UNAUTHORIZED, "{kind:?}");
     }
@@ -636,7 +723,8 @@ async fn admin_listing_sees_every_state() {
 async fn every_transition_is_audited() {
     for kind in Kind::ALL {
         let h = Harness::new();
-        kind.publish(&h, "tenant-a", "alpha", "1.0.0", "public").await;
+        kind.publish(&h, "tenant-a", "alpha", "1.0.0", "public")
+            .await;
         h.call(
             "POST",
             &kind.action("alpha", "withdraw"),
@@ -658,9 +746,7 @@ async fn every_transition_is_audited() {
 
         let cookie = h.login().await;
         let uri = format!("/admin/api/audit?kind={}", kind.audit_kind());
-        let (status, body, _) = h
-            .call("GET", &uri, None, None, Some(&cookie))
-            .await;
+        let (status, body, _) = h.call("GET", &uri, None, None, Some(&cookie)).await;
         assert_eq!(status, StatusCode::OK, "{kind:?}: {body}");
         let items = body["items"].as_array().unwrap();
         let transitions = [
@@ -679,7 +765,13 @@ async fn every_transition_is_audited() {
         // comes back on top.
         assert_eq!(
             actions,
-            ["admin_restore", "takedown", "restore", "withdraw", "publish"],
+            [
+                "admin_restore",
+                "takedown",
+                "restore",
+                "withdraw",
+                "publish"
+            ],
             "{kind:?}"
         );
 
@@ -704,7 +796,13 @@ async fn every_transition_is_audited() {
             Kind::Agent => "skill",
         };
         let (_, filtered, _) = h
-            .call("GET", &format!("/admin/api/audit?kind={other}"), None, None, Some(&cookie))
+            .call(
+                "GET",
+                &format!("/admin/api/audit?kind={other}"),
+                None,
+                None,
+                Some(&cookie),
+            )
             .await;
         let foreign: Vec<&Value> = filtered["items"]
             .as_array()
@@ -721,9 +819,14 @@ async fn every_transition_is_audited() {
 #[tokio::test]
 async fn failed_sign_ins_are_rate_limited() {
     let h = Harness::new();
-    async fn attempt(h: &Harness, username: &str, password: &str) -> (StatusCode, Value, Option<String>) {
+    async fn attempt(
+        h: &Harness,
+        username: &str,
+        password: &str,
+    ) -> (StatusCode, Value, Option<String>) {
         let body = json!({ "username": username, "password": password });
-        h.call("POST", "/admin/api/login", None, Some(body), None).await
+        h.call("POST", "/admin/api/login", None, Some(body), None)
+            .await
     }
     for _ in 0..5 {
         let (status, answer, cookie) = attempt(&h, ADMIN_USER, "wrong").await;
@@ -735,7 +838,10 @@ async fn failed_sign_ins_are_rate_limited() {
     let (status, answer, cookie) = attempt(&h, ADMIN_USER, ADMIN_PASSWORD).await;
     assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{answer}");
     assert_eq!(answer["error"]["code"], "too_many_attempts", "{answer}");
-    assert!(cookie.is_none(), "a locked-out sign-in handed out a session");
+    assert!(
+        cookie.is_none(),
+        "a locked-out sign-in handed out a session"
+    );
 
     // An oversized field is refused before the password is hashed, so it costs
     // nothing and leaves no trail beyond the five misses above.
@@ -774,7 +880,8 @@ async fn failed_sign_ins_are_rate_limited() {
 #[tokio::test]
 async fn sign_in_events_belong_to_no_listing() {
     let h = Harness::new();
-    h.publish_skill("tenant-a", "alpha", "1.0.0", "public").await;
+    h.publish_skill("tenant-a", "alpha", "1.0.0", "public")
+        .await;
 
     // A failed sign-in, then a real one that we end again.
     let (failed, _, _) = h
@@ -817,26 +924,54 @@ async fn sign_in_events_belong_to_no_listing() {
         .collect();
     assert_eq!(
         trail,
-        ["admin_login", "admin_logout", "admin_login", "admin_login_failed"],
+        [
+            "admin_login",
+            "admin_logout",
+            "admin_login",
+            "admin_login_failed"
+        ],
         "{all}"
     );
     for event in &events {
-        assert_eq!(event["kind"], "admin", "{} is not tagged admin", event["action"]);
-        assert!(event["slug"].is_null(), "{} claims a listing", event["action"]);
+        assert_eq!(
+            event["kind"], "admin",
+            "{} is not tagged admin",
+            event["action"]
+        );
+        assert!(
+            event["slug"].is_null(),
+            "{} claims a listing",
+            event["action"]
+        );
     }
 
     // The admin feed is exactly the sign-in trail, and it stays out of the
     // skill feed — otherwise a listing's history looks like it was logged in.
     let (_, admin, _) = h
-        .call("GET", "/admin/api/audit?kind=admin", None, None, Some(&cookie))
+        .call(
+            "GET",
+            "/admin/api/audit?kind=admin",
+            None,
+            None,
+            Some(&cookie),
+        )
         .await;
-    assert!(admin["items"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .all(|item| item["kind"] == "admin"), "{admin}");
+    assert!(
+        admin["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|item| item["kind"] == "admin"),
+        "{admin}"
+    );
     let (_, skills, _) = h
-        .call("GET", "/admin/api/audit?kind=skill", None, None, Some(&cookie))
+        .call(
+            "GET",
+            "/admin/api/audit?kind=skill",
+            None,
+            None,
+            Some(&cookie),
+        )
         .await;
     let signins = skills["items"]
         .as_array()
@@ -844,12 +979,18 @@ async fn sign_in_events_belong_to_no_listing() {
         .iter()
         .filter(|item| item["action"].as_str().unwrap().starts_with("admin_"))
         .count();
-    assert_eq!(signins, 0, "sign-in events leaked into the skill feed: {skills}");
-    assert!(skills["items"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|item| item["action"] == "publish"), "{skills}");
+    assert_eq!(
+        signins, 0,
+        "sign-in events leaked into the skill feed: {skills}"
+    );
+    assert!(
+        skills["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["action"] == "publish"),
+        "{skills}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -860,7 +1001,8 @@ async fn sign_in_events_belong_to_no_listing() {
 async fn writes_are_guarded_like_reads() {
     for kind in Kind::ALL {
         let h = Harness::new();
-        kind.publish(&h, "tenant-a", "alpha", "1.0.0", "public").await;
+        kind.publish(&h, "tenant-a", "alpha", "1.0.0", "public")
+            .await;
 
         // No tenant header on any write route: refused before touching a row.
         let no_tenant = [
@@ -929,7 +1071,8 @@ async fn validate_answers_without_writing_anything() {
         assert_eq!(listing["total"], 0, "{kind:?} validate published something");
 
         // Once the slug exists the same payload is refused, with the reason.
-        kind.publish(&h, "tenant-a", "alpha", "1.0.0", "public").await;
+        kind.publish(&h, "tenant-a", "alpha", "1.0.0", "public")
+            .await;
         let body = match kind {
             Kind::Skill => json!({
                 "name": "Demo Skill", "slug": "alpha", "version": "1.0.0",

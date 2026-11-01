@@ -61,7 +61,8 @@ async fn publisher_name_labels_a_listing_without_touching_ownership() {
     assert_eq!(anon["owner_name"], "admin");
 
     // a tenant nobody reported a name for falls back to nothing at all
-    h.publish_skill("personal-ffff", "quiet", "1.0.0", "public").await;
+    h.publish_skill("personal-ffff", "quiet", "1.0.0", "public")
+        .await;
     let (_s, listing, _) = h
         .call("GET", "/api/v1/skills", Some("tenant-b"), None, None)
         .await;
@@ -251,7 +252,8 @@ async fn listings_carry_the_manifest_description() {
 #[tokio::test]
 async fn private_skills_are_fail_closed() {
     let h = Harness::new();
-    h.publish_skill("tenant-a", "secret", "1.0.0", "tenant").await;
+    h.publish_skill("tenant-a", "secret", "1.0.0", "tenant")
+        .await;
 
     let (status, body, _) = h
         .call("GET", "/skills/secret/1.0.0", Some("tenant-b"), None, None)
@@ -499,8 +501,11 @@ async fn admin_takedown_stops_redistribution_and_blocks_self_restore() {
 #[tokio::test]
 async fn slug_ownership_cannot_be_hijacked() {
     let h = Harness::new();
-    h.publish_skill("tenant-a", "taken", "1.0.0", "public").await;
-    let (status, body) = h.publish_skill("tenant-b", "taken", "2.0.0", "public").await;
+    h.publish_skill("tenant-a", "taken", "1.0.0", "public")
+        .await;
+    let (status, body) = h
+        .publish_skill("tenant-b", "taken", "2.0.0", "public")
+        .await;
     assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
 }
 
@@ -571,7 +576,8 @@ async fn limits_are_exposed_for_the_plugin_to_mirror() {
 async fn lookup_maps_display_name_to_slug_even_after_takedown() {
     let h = Harness::new();
     h.publish_skill("tenant-a", "demo", "1.0.0", "public").await;
-    h.publish_skill("tenant-a", "secret", "1.0.0", "tenant").await;
+    h.publish_skill("tenant-a", "secret", "1.0.0", "tenant")
+        .await;
     let cookie = h.login().await;
     h.call(
         "POST",
@@ -645,7 +651,10 @@ async fn counts_are_written_back_in_a_batch_not_per_fetch() {
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(known_tenants, 0, "a listing GET must not insert a tenant row");
+    assert_eq!(
+        known_tenants, 0,
+        "a listing GET must not insert a tenant row"
+    );
 
     h.flush();
 
@@ -666,8 +675,10 @@ async fn counts_are_written_back_in_a_batch_not_per_fetch() {
 async fn dashboard_counts_visible_active_items_and_keeps_download_history() {
     let h = Harness::new();
     h.publish_skill("tenant-a", "demo", "1.0.0", "public").await;
-    h.publish_skill("tenant-a", "internal", "1.0.0", "tenant").await;
-    h.publish_skill("tenant-b", "other", "1.0.0", "public").await;
+    h.publish_skill("tenant-a", "internal", "1.0.0", "tenant")
+        .await;
+    h.publish_skill("tenant-b", "other", "1.0.0", "public")
+        .await;
 
     // Two successful skill downloads.
     for _ in 0..2 {
@@ -855,7 +866,8 @@ async fn chinese_names_derive_a_pinyin_slug_for_publish_and_preview() {
 #[tokio::test]
 async fn validate_reports_every_problem_without_publishing() {
     let h = Harness::new();
-    h.publish_skill("tenant-a", "taken-id", "1.0.0", "public").await;
+    h.publish_skill("tenant-a", "taken-id", "1.0.0", "public")
+        .await;
 
     let (status, body, _) = h
         .call(
@@ -981,7 +993,8 @@ async fn validate_reports_every_problem_without_publishing() {
 #[tokio::test]
 async fn latest_moves_from_a_prerelease_to_its_release() {
     let h = Harness::new();
-    h.publish_skill("tenant-a", "pre", "1.0.0-beta", "public").await;
+    h.publish_skill("tenant-a", "pre", "1.0.0-beta", "public")
+        .await;
     let (_, listing, _) = h
         .call("GET", "/api/v1/skills", Some("tenant-b"), None, None)
         .await;
@@ -1019,7 +1032,8 @@ async fn an_idle_write_back_never_touches_the_database() {
     let (status, _) = h.download("/skills/demo/latest", Some("tenant-a")).await;
     assert_eq!(status, StatusCode::OK);
 
-    h.db().trace_v2(TraceEventCodes::SQLITE_TRACE_STMT, Some(count_statement));
+    h.db()
+        .trace_v2(TraceEventCodes::SQLITE_TRACE_STMT, Some(count_statement));
 
     // First prove the probe works: a batch with something in it must produce
     // statements, otherwise the zero below would be meaningless.

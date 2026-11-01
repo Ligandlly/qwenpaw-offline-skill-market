@@ -230,7 +230,9 @@ async fn listing_payload_has_a_fixed_shape() {
     let mut seen = Vec::new();
     for kind in Kind::ALL {
         let h = Harness::new();
-        let (status, body) = kind.publish(&h, "tenant-a", "alpha", "1.0.0", "public").await;
+        let (status, body) = kind
+            .publish(&h, "tenant-a", "alpha", "1.0.0", "public")
+            .await;
         assert_eq!(status, StatusCode::CREATED, "{kind:?}: {body}");
 
         let (status, listing, _) = h
@@ -279,7 +281,9 @@ async fn listing_payload_has_a_fixed_shape() {
 async fn search_treats_wildcards_as_text() {
     for kind in Kind::ALL {
         let h = Harness::new();
-        let (status, body) = kind.publish(&h, "tenant-a", "alpha", "1.0.0", "public").await;
+        let (status, body) = kind
+            .publish(&h, "tenant-a", "alpha", "1.0.0", "public")
+            .await;
         assert_eq!(status, StatusCode::CREATED, "{kind:?}: {body}");
 
         for wildcard in ["%25", "_", "%25%25"] {
@@ -295,7 +299,10 @@ async fn search_treats_wildcards_as_text() {
         let uri = format!("{}?q=alp", kind.list());
         let (status, listing, _) = h.call("GET", &uri, Some("tenant-b"), None, None).await;
         assert_eq!(status, StatusCode::OK, "{kind:?}: {listing}");
-        assert_eq!(listing["total"], 1, "{kind:?} plain search broke: {listing}");
+        assert_eq!(
+            listing["total"], 1,
+            "{kind:?} plain search broke: {listing}"
+        );
     }
 }
 
@@ -313,7 +320,10 @@ async fn pagination_counts_every_row_but_returns_one_page() {
         assert_eq!(status, StatusCode::OK, "{kind:?}");
         assert_eq!(page["total"], 3, "{kind:?} total counts every row");
         assert_eq!(page["items"].as_array().unwrap().len(), 2, "{kind:?}");
-        assert_eq!((page["page"].as_i64(), page["limit"].as_i64()), (Some(1), Some(2)));
+        assert_eq!(
+            (page["page"].as_i64(), page["limit"].as_i64()),
+            (Some(1), Some(2))
+        );
 
         let uri = format!("{}?limit=2&page=2", kind.list());
         let (_, page, _) = h.call("GET", &uri, Some("tenant-b"), None, None).await;
@@ -338,8 +348,15 @@ async fn pagination_counts_every_row_but_returns_one_page() {
         for page in ["0", "-3", "9223372036854775807"] {
             let uri = format!("{}?page={page}", kind.list());
             let (status, body, _) = h.call("GET", &uri, Some("tenant-b"), None, None).await;
-            assert_eq!(status, StatusCode::BAD_REQUEST, "{kind:?} page={page}: {body}");
-            assert_eq!(body["error"]["code"], "invalid_page", "{kind:?} page={page}");
+            assert_eq!(
+                status,
+                StatusCode::BAD_REQUEST,
+                "{kind:?} page={page}: {body}"
+            );
+            assert_eq!(
+                body["error"]["code"], "invalid_page",
+                "{kind:?} page={page}"
+            );
         }
         // Not a number at all: rejected before any query runs.
         let uri = format!("{}?page=later", kind.list());
@@ -390,9 +407,12 @@ async fn listing_is_newest_first_and_sort_keys_are_whitelisted() {
 async fn mine_shows_withdrawn_but_never_other_tenants() {
     for kind in Kind::ALL {
         let h = Harness::new();
-        kind.publish(&h, "tenant-a", "kept", "1.0.0", "public").await;
-        kind.publish(&h, "tenant-a", "gone", "1.0.0", "public").await;
-        kind.publish(&h, "tenant-b", "foreign", "1.0.0", "public").await;
+        kind.publish(&h, "tenant-a", "kept", "1.0.0", "public")
+            .await;
+        kind.publish(&h, "tenant-a", "gone", "1.0.0", "public")
+            .await;
+        kind.publish(&h, "tenant-b", "foreign", "1.0.0", "public")
+            .await;
 
         let (status, body, _) = h
             .call(
@@ -473,7 +493,9 @@ async fn download_roundtrips_every_file_byte_for_byte() {
         );
 
         // A pinned version and `latest` must serve the same bytes.
-        let (status, pinned) = h.download(&kind.bundle("alpha", "1.0.0"), Some("tenant-b")).await;
+        let (status, pinned) = h
+            .download(&kind.bundle("alpha", "1.0.0"), Some("tenant-b"))
+            .await;
         assert_eq!(status, StatusCode::OK, "{kind:?}");
         assert_eq!(pinned, bytes, "{kind:?} latest == pinned");
     }
@@ -483,7 +505,8 @@ async fn download_roundtrips_every_file_byte_for_byte() {
 async fn install_urls_point_at_a_fetchable_bundle() {
     for kind in Kind::ALL {
         let h = Harness::new();
-        kind.publish(&h, "tenant-a", "alpha", "2.1.3", "public").await;
+        kind.publish(&h, "tenant-a", "alpha", "2.1.3", "public")
+            .await;
         let (_, listing, _) = h
             .call("GET", kind.list(), Some("tenant-b"), None, None)
             .await;
@@ -501,7 +524,9 @@ async fn install_urls_point_at_a_fetchable_bundle() {
         let (status, advertised) = h.download(path, Some("tenant-b")).await;
         assert_eq!(status, StatusCode::OK, "{kind:?} advertised url {path}");
 
-        let (_, long_form) = h.download(&kind.bundle("alpha", "2.1.3"), Some("tenant-b")).await;
+        let (_, long_form) = h
+            .download(&kind.bundle("alpha", "2.1.3"), Some("tenant-b"))
+            .await;
         assert_eq!(advertised, long_form, "{kind:?} alias == long form");
     }
 }
@@ -519,10 +544,14 @@ async fn install_urls_point_at_a_fetchable_bundle() {
 async fn bundle_failures_have_one_taxonomy() {
     for kind in Kind::ALL {
         let h = Harness::new();
-        kind.publish(&h, "tenant-a", "open", "1.0.0", "public").await;
-        kind.publish(&h, "tenant-a", "secret", "1.0.0", "tenant").await;
-        kind.publish(&h, "tenant-a", "retired", "1.0.0", "public").await;
-        kind.publish(&h, "tenant-a", "banned", "1.0.0", "public").await;
+        kind.publish(&h, "tenant-a", "open", "1.0.0", "public")
+            .await;
+        kind.publish(&h, "tenant-a", "secret", "1.0.0", "tenant")
+            .await;
+        kind.publish(&h, "tenant-a", "retired", "1.0.0", "public")
+            .await;
+        kind.publish(&h, "tenant-a", "banned", "1.0.0", "public")
+            .await;
 
         let (status, body, _) = h
             .call(
@@ -630,7 +659,13 @@ async fn bundle_failures_have_one_taxonomy() {
             let (status, bytes) = h
                 .download(&kind.bundle(case.slug, case.version), Some(case.tenant))
                 .await;
-            assert_eq!(status, case.status, "{kind:?} {}: {}", case.what, String::from_utf8_lossy(&bytes));
+            assert_eq!(
+                status,
+                case.status,
+                "{kind:?} {}: {}",
+                case.what,
+                String::from_utf8_lossy(&bytes)
+            );
             if case.status.is_success() {
                 continue;
             }
@@ -643,7 +678,9 @@ async fn bundle_failures_have_one_taxonomy() {
             );
             assert_eq!(body["error"]["code"], case.code, "{kind:?} {}", case.what);
             assert!(
-                body["error"]["message"].as_str().is_some_and(|m| !m.is_empty()),
+                body["error"]["message"]
+                    .as_str()
+                    .is_some_and(|m| !m.is_empty()),
                 "{kind:?} {}: {body}",
                 case.what
             );
@@ -659,10 +696,14 @@ async fn bundle_failures_have_one_taxonomy() {
 async fn status_endpoint_reports_state_and_hides_foreign_entries() {
     for kind in Kind::ALL {
         let h = Harness::new();
-        kind.publish(&h, "tenant-a", "open", "1.0.0", "public").await;
-        kind.publish(&h, "tenant-a", "secret", "1.0.0", "tenant").await;
-        kind.publish(&h, "tenant-a", "retired", "2.0.0", "public").await;
-        kind.publish(&h, "tenant-a", "banned", "1.0.0", "public").await;
+        kind.publish(&h, "tenant-a", "open", "1.0.0", "public")
+            .await;
+        kind.publish(&h, "tenant-a", "secret", "1.0.0", "tenant")
+            .await;
+        kind.publish(&h, "tenant-a", "retired", "2.0.0", "public")
+            .await;
+        kind.publish(&h, "tenant-a", "banned", "1.0.0", "public")
+            .await;
 
         let (status, body, _) = h
             .call(
@@ -701,7 +742,11 @@ async fn status_endpoint_reports_state_and_hides_foreign_entries() {
             if !expected.is_success() {
                 continue;
             }
-            assert_eq!(field_names(&body), ["latest_version", "name", "slug", "state", "takedown_reason"], "{kind:?}");
+            assert_eq!(
+                field_names(&body),
+                ["latest_version", "name", "slug", "state", "takedown_reason"],
+                "{kind:?}"
+            );
             assert_eq!(body["slug"], slug, "{kind:?}");
             assert_eq!(body["state"], state, "{kind:?} {slug}");
         }
@@ -733,8 +778,15 @@ async fn visibility_is_a_closed_enum() {
                 Kind::Skill => h.publish_skill_with("tenant-a", body).await,
                 Kind::Agent => h.publish_agent_with("tenant-a", body).await,
             };
-            assert_eq!(status, StatusCode::BAD_REQUEST, "{kind:?} visibility={bad}: {body}");
-            assert_eq!(body["error"]["code"], "invalid_visibility", "{kind:?} {bad}");
+            assert_eq!(
+                status,
+                StatusCode::BAD_REQUEST,
+                "{kind:?} visibility={bad}: {body}"
+            );
+            assert_eq!(
+                body["error"]["code"], "invalid_visibility",
+                "{kind:?} {bad}"
+            );
         }
     }
 }
@@ -762,7 +814,10 @@ async fn lookup_maps_display_names_for_both_planes() {
             .await;
         assert_eq!(status, StatusCode::CREATED, "{kind:?}: {body}");
 
-        let uri = format!("{}/lookup?names=Alpha%20Item,Secret,nobody-has-this", kind.list());
+        let uri = format!(
+            "{}/lookup?names=Alpha%20Item,Secret,nobody-has-this",
+            kind.list()
+        );
         let (status, found, _) = h.call("GET", &uri, Some("tenant-a"), None, None).await;
         assert_eq!(status, StatusCode::OK, "{kind:?}: {found}");
         assert_eq!(field_names(&found), ["items"], "{kind:?} envelope");
@@ -795,7 +850,13 @@ async fn lookup_maps_display_names_for_both_planes() {
 
         // Withdrawn entries still answer: that is why the host asks.
         let (status, _, _) = h
-            .call("POST", &kind.action("alpha", "withdraw"), Some("tenant-a"), Some(json!({})), None)
+            .call(
+                "POST",
+                &kind.action("alpha", "withdraw"),
+                Some("tenant-a"),
+                Some(json!({})),
+                None,
+            )
             .await;
         assert_eq!(status, StatusCode::OK, "{kind:?} withdraw");
         let uri = format!("{}/lookup?names=Alpha%20Item", kind.list());
@@ -823,7 +884,13 @@ async fn validate_reports_the_same_shape_on_both_planes() {
 
         // A clean bundle: no problems, nothing published.
         let (status, answer, _) = h
-            .call("POST", &uri, Some("tenant-a"), Some(body("1.0.0", kind.files())), None)
+            .call(
+                "POST",
+                &uri,
+                Some("tenant-a"),
+                Some(body("1.0.0", kind.files())),
+                None,
+            )
             .await;
         assert_eq!(status, StatusCode::OK, "{kind:?}: {answer}");
         assert_eq!(
@@ -854,7 +921,9 @@ async fn validate_reports_the_same_shape_on_both_planes() {
             ["max_bundle_bytes", "max_file_bytes", "max_files"],
             "{kind:?}"
         );
-        let (_, listing, _) = h.call("GET", kind.list(), Some("tenant-a"), None, None).await;
+        let (_, listing, _) = h
+            .call("GET", kind.list(), Some("tenant-a"), None, None)
+            .await;
         assert_eq!(listing["total"], 0, "{kind:?} dry run wrote a row");
 
         // A broken bundle explains itself, and still writes nothing.
@@ -873,18 +942,34 @@ async fn validate_reports_the_same_shape_on_both_planes() {
             !answer["problems"].as_array().unwrap().is_empty(),
             "{kind:?}: {answer}"
         );
-        let (_, listing, _) = h.call("GET", kind.list(), Some("tenant-a"), None, None).await;
-        assert_eq!(listing["total"], 0, "{kind:?} rejected bundle was published");
+        let (_, listing, _) = h
+            .call("GET", kind.list(), Some("tenant-a"), None, None)
+            .await;
+        assert_eq!(
+            listing["total"], 0,
+            "{kind:?} rejected bundle was published"
+        );
 
         // Once the slug is real, the same payload reports the collision.
-        let (status, _) = kind.publish(&h, "tenant-a", "alpha", "1.0.0", "public").await;
+        let (status, _) = kind
+            .publish(&h, "tenant-a", "alpha", "1.0.0", "public")
+            .await;
         assert_eq!(status, StatusCode::CREATED, "{kind:?}");
         let (status, answer, _) = h
-            .call("POST", &uri, Some("tenant-a"), Some(body("1.0.0", kind.files())), None)
+            .call(
+                "POST",
+                &uri,
+                Some("tenant-a"),
+                Some(body("1.0.0", kind.files())),
+                None,
+            )
             .await;
         assert_eq!(status, StatusCode::OK, "{kind:?}: {answer}");
         assert_eq!(answer["ok"], false, "{kind:?}: {answer}");
-        assert_eq!(answer["problems"][0]["code"], "version_exists", "{kind:?}: {answer}");
+        assert_eq!(
+            answer["problems"][0]["code"], "version_exists",
+            "{kind:?}: {answer}"
+        );
         assert_eq!(answer["next_version"], "1.0.1", "{kind:?}: {answer}");
         assert_eq!(answer["existing"]["mine"], true, "{kind:?}: {answer}");
         assert_eq!(answer["existing"]["state"], "active", "{kind:?}: {answer}");

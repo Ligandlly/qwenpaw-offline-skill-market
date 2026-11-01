@@ -18,9 +18,7 @@ use tracing::{error, info, warn};
 /// silently ignored setting.
 pub fn parse_level(spec: &str) -> Result<LevelFilter, String> {
     LevelFilter::from_str(spec.trim()).map_err(|_| {
-        format!(
-            "未知的日志级别 {spec:?}，可选 off / error / warn / info / debug / trace"
-        )
+        format!("未知的日志级别 {spec:?}，可选 off / error / warn / info / debug / trace")
     })
 }
 

@@ -31,12 +31,10 @@ pub const ADMIN_PASSWORD: &str = "s3cret-pw";
 
 /// A minimal but *valid* `SKILL.md` manifest: file name + frontmatter name must
 /// both parse, otherwise `check_bundle` rejects the publish.
-pub const GOOD_MANIFEST: &str =
-    "---\nname: demo\ndescription: a demo skill\n---\n\n# hello\n";
+pub const GOOD_MANIFEST: &str = "---\nname: demo\ndescription: a demo skill\n---\n\n# hello\n";
 
 /// The same manifest under a different `name`, for bundles that carry skills.
-pub const GOOD_SKILL: &str =
-    "---\nname: demo-skill\ndescription: a demo skill\n---\n\n# hello\n";
+pub const GOOD_SKILL: &str = "---\nname: demo-skill\ndescription: a demo skill\n---\n\n# hello\n";
 
 pub fn test_config() -> Config {
     Config {
@@ -224,11 +222,7 @@ impl Harness {
         (status, reply, bytes)
     }
 
-    pub async fn download(
-        &self,
-        uri: &str,
-        tenant: Option<&str>,
-    ) -> (StatusCode, Bytes) {
+    pub async fn download(&self, uri: &str, tenant: Option<&str>) -> (StatusCode, Bytes) {
         let (status, _headers, bytes, _) = self.call_raw("GET", uri, tenant, None, None).await;
         (status, bytes)
     }

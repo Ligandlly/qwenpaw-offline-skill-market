@@ -52,7 +52,7 @@ impl Config {
             admin_password: std::env::var("ADMIN_PASSWORD").unwrap_or_default(),
             log_level: std::env::var("MARKET_LOG").unwrap_or_else(|_| "info".into()),
             request_timeout: Duration::from_millis(
-                num("MARKET_REQUEST_TIMEOUT_MS", 30_000).max(1) as u64,
+                num("MARKET_REQUEST_TIMEOUT_MS", 30_000).max(1) as u64
             ),
             limits: Limits::from_env(),
         };
@@ -106,7 +106,9 @@ fn validate_public_url(url: &str) -> Result<(), String> {
 
 fn validate_bind(bind: &str) -> Result<(), String> {
     let Some((host, port)) = bind.rsplit_once(':') else {
-        return Err(format!("MARKET_BIND={bind} 需要 host:port 形式，例如 0.0.0.0:8080"));
+        return Err(format!(
+            "MARKET_BIND={bind} 需要 host:port 形式，例如 0.0.0.0:8080"
+        ));
     };
     let port: u16 = port
         .parse()
@@ -115,7 +117,9 @@ fn validate_bind(bind: &str) -> Result<(), String> {
         return Err(format!("MARKET_BIND={bind} 的端口不能是 0"));
     }
     if host.is_empty() {
-        return Err(format!("MARKET_BIND={bind} 缺少主机地址，例如 0.0.0.0:8080"));
+        return Err(format!(
+            "MARKET_BIND={bind} 缺少主机地址，例如 0.0.0.0:8080"
+        ));
     }
     Ok(())
 }
@@ -169,7 +173,13 @@ mod tests {
 
     #[test]
     fn rejects_a_public_url_clients_cannot_fetch() {
-        for url in ["localhost:8080", "/market", "ftp://market", "http://", "http://a b"] {
+        for url in [
+            "localhost:8080",
+            "/market",
+            "ftp://market",
+            "http://",
+            "http://a b",
+        ] {
             let mut cfg = sane();
             cfg.public_url = url.into();
             assert!(cfg.validate().is_err(), "{url} must be refused");
@@ -199,7 +209,9 @@ mod tests {
     fn rejects_a_guessable_admin_password_but_allows_the_generated_one() {
         let mut cfg = sane();
         cfg.admin_password = "short".into();
-        let err = cfg.validate().expect_err("a five-character password is refused");
+        let err = cfg
+            .validate()
+            .expect_err("a five-character password is refused");
         assert!(err.contains("ADMIN_PASSWORD"), "{err}");
 
         cfg.admin_password = "long-enough".into();

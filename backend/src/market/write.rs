@@ -15,7 +15,11 @@ use super::Entity;
 /// Records that this tenant published: `display_name` is only written when the
 /// plugin actually sent one, so a publish without it cannot wipe the name an
 /// earlier one recorded.
-pub(crate) fn record_tenant(db: &Connection, tenant: &str, display_name: Option<&str>) -> ApiResult<()> {
+pub(crate) fn record_tenant(
+    db: &Connection,
+    tenant: &str,
+    display_name: Option<&str>,
+) -> ApiResult<()> {
     db.execute(
         "INSERT INTO tenants (id, first_seen, last_seen, display_name) VALUES (?1, ?2, ?2, ?3)
          ON CONFLICT(id) DO UPDATE SET last_seen = excluded.last_seen,
@@ -57,17 +61,13 @@ impl Listing {
 /// Loads the listing a write targets. `None` means the slug is free — a real
 /// read failure is an error, never "not there".
 pub(crate) fn listing(db: &Connection, entity: &Entity, slug: &str) -> ApiResult<Option<Listing>> {
-    db.query_row(
-        entity.select_lifecycle,
-        params![slug],
-        |row| {
-            Ok(Listing {
-                owner_tenant: row.get(0)?,
-                latest_version: row.get(1)?,
-                taken_down: row.get::<_, Option<i64>>(2)?.is_some(),
-            })
-        },
-    )
+    db.query_row(entity.select_lifecycle, params![slug], |row| {
+        Ok(Listing {
+            owner_tenant: row.get(0)?,
+            latest_version: row.get(1)?,
+            taken_down: row.get::<_, Option<i64>>(2)?.is_some(),
+        })
+    })
     .optional()
     .map_err(ApiError::db)
 }
@@ -225,14 +225,20 @@ pub(crate) fn store(
             Labels::Column => {
                 if let Some(description) = description {
                     tx.execute(
-                        &format!("UPDATE {} SET description = ?2 WHERE slug = ?1", entity.table),
+                        &format!(
+                            "UPDATE {} SET description = ?2 WHERE slug = ?1",
+                            entity.table
+                        ),
                         params![slug, description],
                     )
                     .map_err(ApiError::db)?;
                 }
                 if let Some(skill_count) = skill_count {
                     tx.execute(
-                        &format!("UPDATE {} SET skill_count = ?2 WHERE slug = ?1", entity.table),
+                        &format!(
+                            "UPDATE {} SET skill_count = ?2 WHERE slug = ?1",
+                            entity.table
+                        ),
                         params![slug, skill_count],
                     )
                     .map_err(ApiError::db)?;
@@ -241,7 +247,10 @@ pub(crate) fn store(
             Labels::ManifestColumn => {
                 if let Some(manifest_text) = manifest_text {
                     tx.execute(
-                        &format!("UPDATE {} SET manifest_text = ?2 WHERE slug = ?1", entity.table),
+                        &format!(
+                            "UPDATE {} SET manifest_text = ?2 WHERE slug = ?1",
+                            entity.table
+                        ),
                         params![slug, manifest_text],
                     )
                     .map_err(ApiError::db)?;

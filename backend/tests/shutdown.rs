@@ -36,7 +36,9 @@ fn start_market(db_dir: &std::path::Path, port: u16) -> Child {
 fn health(port: u16) -> Option<String> {
     let mut stream = TcpStream::connect(("127.0.0.1", port)).ok()?;
     stream.set_read_timeout(Some(Duration::from_secs(2))).ok()?;
-    stream.set_write_timeout(Some(Duration::from_secs(2))).ok()?;
+    stream
+        .set_write_timeout(Some(Duration::from_secs(2)))
+        .ok()?;
     stream
         .write_all(b"GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
         .ok()?;
@@ -81,10 +83,8 @@ fn wait_for_exit(child: &mut Child) -> std::process::ExitStatus {
 #[test]
 fn a_stop_signal_shuts_down_cleanly() {
     for name in ["TERM", "INT"] {
-        let dir = std::env::temp_dir().join(format!(
-            "market-shutdown-{}-{name}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("market-shutdown-{}-{name}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("temp dir");
         let port = free_port();
         let mut child = start_market(&dir, port);

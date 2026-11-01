@@ -123,8 +123,7 @@ fn accepts_gzip(headers: &HeaderMap) -> bool {
 fn gzip(bytes: &[u8]) -> ApiResult<Vec<u8>> {
     use std::io::Write;
 
-    let mut encoder =
-        flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
     let failed = |err: std::io::Error| {
         ApiError::new(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -154,8 +153,14 @@ mod tests {
 
     #[test]
     fn refuses_gzip_when_the_client_says_no() {
-        assert!(accepts_gzip(&headers(&[("accept-encoding", "gzip, deflate")])));
-        assert!(accepts_gzip(&headers(&[("accept-encoding", "deflate, GZIP")])));
+        assert!(accepts_gzip(&headers(&[(
+            "accept-encoding",
+            "gzip, deflate"
+        )])));
+        assert!(accepts_gzip(&headers(&[(
+            "accept-encoding",
+            "deflate, GZIP"
+        )])));
         assert!(!accepts_gzip(&headers(&[("accept-encoding", "gzip;q=0")])));
         assert!(!accepts_gzip(&headers(&[("accept-encoding", "deflate")])));
         assert!(!accepts_gzip(&headers(&[])));

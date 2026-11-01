@@ -137,7 +137,11 @@ async fn a_listing_failure_is_not_an_empty_market() {
         let (status, listing, _) = h
             .call("GET", kind.list(), Some("tenant-b"), None, None)
             .await;
-        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{kind:?}: {listing}");
+        assert_eq!(
+            status,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "{kind:?}: {listing}"
+        );
         assert_eq!(listing["error"]["code"], "db_error", "{kind:?}: {listing}");
 
         kind.restore(&h, table, "broken_listing");
@@ -170,7 +174,9 @@ async fn a_listing_does_not_need_the_version_tables() {
         let item = &listing["items"][0];
         assert_eq!(item["versions"], 1, "{kind:?}: {listing}");
         assert!(
-            item["description"].as_str().is_some_and(|text| !text.is_empty()),
+            item["description"]
+                .as_str()
+                .is_some_and(|text| !text.is_empty()),
             "{kind:?}: {listing}"
         );
 
@@ -201,12 +207,17 @@ async fn a_publish_is_all_or_nothing() {
             .call("GET", kind.list(), Some("tenant-a"), None, None)
             .await;
         assert_eq!(status, StatusCode::OK, "{kind:?}: {listing}");
-        assert_eq!(listing["total"], 0, "{kind:?} publish leaked a row: {listing}");
+        assert_eq!(
+            listing["total"], 0,
+            "{kind:?} publish leaked a row: {listing}"
+        );
         let rows: i64 = h
             .db()
-            .query_row(&format!("SELECT COUNT(*) FROM {}", kind.table()), [], |row| {
-                row.get(0)
-            })
+            .query_row(
+                &format!("SELECT COUNT(*) FROM {}", kind.table()),
+                [],
+                |row| row.get(0),
+            )
             .unwrap();
         assert_eq!(rows, 0, "{kind:?} left a row in {}", kind.table());
 
@@ -216,7 +227,11 @@ async fn a_publish_is_all_or_nothing() {
         let (_, listing, _) = h
             .call("GET", kind.list(), Some("tenant-b"), None, None)
             .await;
-        assert_eq!(find(&listing, "alpha")["latest_version"], "1.0.0", "{kind:?}");
+        assert_eq!(
+            find(&listing, "alpha")["latest_version"],
+            "1.0.0",
+            "{kind:?}"
+        );
     }
 }
 

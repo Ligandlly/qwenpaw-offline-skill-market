@@ -14,7 +14,7 @@ use crate::error::{ApiError, ApiResult};
 use crate::limits::FileData;
 use crate::state::Shared;
 
-use super::entity::{normalize_sort, row_to_entry, Entry, Entity, Labels};
+use super::entity::{normalize_sort, row_to_entry, Entity, Entry, Labels};
 
 /// `GET /api/v1/{skills,agents}`: one page of the market.
 ///
@@ -44,7 +44,10 @@ pub(crate) fn list_page(
     );
     let total: i64 = db
         .query_row(
-            &format!("SELECT COUNT(*) FROM {} {alias} WHERE {filter}", entity.table),
+            &format!(
+                "SELECT COUNT(*) FROM {} {alias} WHERE {filter}",
+                entity.table
+            ),
             params![tenant, pattern],
             |row| row.get(0),
         )
@@ -164,7 +167,13 @@ pub(crate) fn status(
     tenant: &str,
     slug: &str,
 ) -> ApiResult<Value> {
-    let missing = || ApiError::new(StatusCode::NOT_FOUND, "not_found", format!("{}不存在", entity.label));
+    let missing = || {
+        ApiError::new(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            format!("{}不存在", entity.label),
+        )
+    };
     let sql = format!(
         "SELECT slug, name, owner_tenant, visibility, latest_version, withdrawn_at,
                 takedown_at, takedown_reason
@@ -287,9 +296,7 @@ pub(crate) fn bundle(
     }
 
     let resolved = if version == "latest" {
-        latest.ok_or_else(|| {
-            ApiError::new(StatusCode::GONE, "gone", "还没有已发布的版本")
-        })?
+        latest.ok_or_else(|| ApiError::new(StatusCode::GONE, "gone", "还没有已发布的版本"))?
     } else {
         version.to_string()
     };
@@ -350,7 +357,10 @@ fn labels_of(
                     format!("存储的{}包缺少可读的 {path}", entity.label),
                 )
             };
-            let text = files.get(path).and_then(FileData::as_text).ok_or_else(corrupt)?;
+            let text = files
+                .get(path)
+                .and_then(FileData::as_text)
+                .ok_or_else(corrupt)?;
             let manifest: Value = serde_json::from_str(text).map_err(|_| corrupt())?;
             let text_of = |key: &str| -> Option<String> {
                 manifest
@@ -368,4 +378,3 @@ fn labels_of(
 }
 
 // ---------------------------------------------------------------- writing ---
-

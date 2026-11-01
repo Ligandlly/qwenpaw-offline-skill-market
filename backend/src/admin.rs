@@ -10,10 +10,10 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use tracing::{debug, error, info, warn};
 
-use crate::dto::fifty;
-use crate::error::{ApiError, ApiResult};
 use crate::auth::{self, Admin};
 use crate::db::{audit_kind, now, AUDIT_ADMIN, AUDIT_AGENT, AUDIT_SKILL};
+use crate::dto::fifty;
+use crate::error::{ApiError, ApiResult};
 use crate::market;
 use crate::state::Shared;
 
@@ -282,7 +282,13 @@ pub async fn restore(
 ) -> ApiResult<Json<Value>> {
     crate::db::offload(&app, move |app| {
         let db = app.db();
-        market::change_state(&db, &market::SKILL, &slug, market::Change::Lift, &admin.actor())
+        market::change_state(
+            &db,
+            &market::SKILL,
+            &slug,
+            market::Change::Lift,
+            &admin.actor(),
+        )
     })
     .await
     .map(Json)
