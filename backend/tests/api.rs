@@ -5,7 +5,16 @@ mod common;
 
 use axum::http::StatusCode;
 use common::{find, Harness, GOOD_MANIFEST};
+use rusqlite::trace::{TraceEvent, TraceEventCodes};
 use serde_json::json;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+/// Counts the statements SQLite actually executes on the connection.
+static STATEMENTS: AtomicUsize = AtomicUsize::new(0);
+
+fn count_statement(_event: TraceEvent<'_>) {
+    STATEMENTS.fetch_add(1, Ordering::SeqCst);
+}
 
 #[tokio::test]
 async fn publisher_name_labels_a_listing_without_touching_ownership() {
@@ -998,4 +1007,40 @@ async fn latest_moves_from_a_prerelease_to_its_release() {
     assert_eq!(status, StatusCode::OK);
     let bundle: serde_json::Value = serde_json::from_slice(&bundle).unwrap();
     assert_eq!(bundle["version"], "1.0.0");
+}
+
+/// The write-back runs every 5 seconds whether or not anything happened, so the
+/// empty batch has to stop *before* it takes the connection: an idle market must
+/// cost SQLite nothing at all — no transaction, no statement, no WAL frame.
+#[tokio::test]
+async fn an_idle_write_back_never_touches_the_database() {
+    let h = Harness::new();
+    h.publish_skill("tenant-a", "demo", "1.0.0", "public").await;
+    let (status, _) = h.download("/skills/demo/latest", Some("tenant-a")).await;
+    assert_eq!(status, StatusCode::OK);
+
+    h.db().trace_v2(TraceEventCodes::SQLITE_TRACE_STMT, Some(count_statement));
+
+    // First prove the probe works: a batch with something in it must produce
+    // statements, otherwise the zero below would be meaningless.
+    STATEMENTS.store(0, Ordering::SeqCst);
+    h.flush();
+    assert!(
+        STATEMENTS.load(Ordering::SeqCst) > 0,
+        "the probe must observe a real write-back"
+    );
+
+    // Now the interesting case: nothing accumulated, two intervals in a row.
+    STATEMENTS.store(0, Ordering::SeqCst);
+    h.flush();
+    h.flush();
+    assert_eq!(
+        STATEMENTS.load(Ordering::SeqCst),
+        0,
+        "an empty batch must not reach SQLite at all"
+    );
+
+    // And the counters that were flushed are still there, so the silence above
+    // was not a skipped batch.
+    assert_eq!(h.stored_downloads("skills", "demo"), 1);
 }
