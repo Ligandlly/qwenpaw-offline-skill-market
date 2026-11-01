@@ -92,10 +92,8 @@ impl Kind {
 }
 
 /// A download whose query cannot run at all must not be reported as a missing
-/// version or a vanished package. Ignored while `fetch_bundle` still funnels
-/// every `rusqlite` error into `not_found`/`gone`.
+/// version or a vanished package.
 #[tokio::test]
-#[ignore = "P0 未修：DB 错误只把 NoRows 映射 404/410 (t_ffefa1b692dc)"]
 async fn a_download_failure_is_not_a_missing_package() {
     for kind in Kind::ALL {
         let h = Harness::new();
@@ -198,7 +196,6 @@ async fn a_publish_is_all_or_nothing() {
 /// the audit `INSERT` as two separate statements, so today the flag sticks
 /// while the request fails.
 #[tokio::test]
-#[ignore = "P0 未修：状态变更与审计写入同一事务 (t_dcf206dce4a6)"]
 async fn a_state_change_is_all_or_nothing() {
     for kind in Kind::ALL {
         let h = Harness::new();

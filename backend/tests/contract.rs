@@ -119,6 +119,56 @@ impl Kind {
         }
     }
 
+    /// Publishes under a display name of our choosing: the lookup endpoint is
+    /// keyed on the display name, so the test has to control it.
+    async fn publish_named(
+        self,
+        h: &Harness,
+        tenant: &str,
+        slug: &str,
+        version: &str,
+        name: &str,
+        visibility: &str,
+    ) -> (StatusCode, Value) {
+        match self {
+            Kind::Skill => {
+                h.publish_skill_with(
+                    tenant,
+                    json!({
+                        "name": name,
+                        "slug": slug,
+                        "version": version,
+                        "visibility": visibility,
+                        "files": { "SKILL.md": format!(
+                            "---\nname: {name}\ndescription: {name} 的描述\n---\n\n# {name}\n"
+                        )}
+                    }),
+                )
+                .await
+            }
+            Kind::Agent => {
+                h.publish_agent_with(
+                    tenant,
+                    json!({
+                        "slug": slug,
+                        "version": version,
+                        "visibility": visibility,
+                        "files": agent_files(name, &format!("{name} 的描述"))
+                    }),
+                )
+                .await
+            }
+        }
+    }
+
+    /// The field carrying the fetchable URL of the latest version.
+    fn bundle_field(self) -> &'static str {
+        match self {
+            Kind::Skill => "install_url",
+            Kind::Agent => "bundle_url",
+        }
+    }
+
     async fn admin(&self, h: &Harness, slug: &str, action: &str) -> (StatusCode, Value) {
         let cookie = h.login().await;
         let (status, body, _) = h
@@ -256,6 +306,19 @@ async fn pagination_counts_every_row_but_returns_one_page() {
         let (_, page, _) = h.call("GET", &uri, Some("tenant-b"), None, None).await;
         assert_eq!(page["limit"], 50, "{kind:?} limit clamp");
         assert_eq!(page["total"], 3, "{kind:?}");
+
+        // A page number that cannot become an offset is the caller's mistake:
+        // say so, instead of panicking or quietly serving page one.
+        for page in ["0", "-3", "9223372036854775807"] {
+            let uri = format!("{}?page={page}", kind.list());
+            let (status, body, _) = h.call("GET", &uri, Some("tenant-b"), None, None).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{kind:?} page={page}: {body}");
+            assert_eq!(body["error"]["code"], "invalid_page", "{kind:?} page={page}");
+        }
+        // Not a number at all: rejected before any query runs.
+        let uri = format!("{}?page=later", kind.list());
+        let (status, _, _) = h.call("GET", &uri, Some("tenant-b"), None, None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{kind:?}");
     }
 }
 
@@ -647,5 +710,157 @@ async fn visibility_is_a_closed_enum() {
             assert_eq!(status, StatusCode::BAD_REQUEST, "{kind:?} visibility={bad}: {body}");
             assert_eq!(body["error"]["code"], "invalid_visibility", "{kind:?} {bad}");
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// lookup and dry run
+// ---------------------------------------------------------------------------
+
+/// The host maps an installed item back to the market by display name, so both
+/// planes answer the same lookup question with the same shape.
+#[tokio::test]
+async fn lookup_maps_display_names_for_both_planes() {
+    for kind in Kind::ALL {
+        let h = Harness::new();
+        // Both planes publish under an explicit display name: lookup is keyed
+        // on it, and the fixtures would otherwise decide the answer.
+        let name = "Alpha Item";
+        let (status, body) = kind
+            .publish_named(&h, "tenant-a", "alpha", "1.0.0", name, "public")
+            .await;
+        assert_eq!(status, StatusCode::CREATED, "{kind:?}: {body}");
+        // A private entry is only the owner's business.
+        let (status, body) = kind
+            .publish_named(&h, "tenant-a", "beta", "1.0.0", "Secret", "tenant")
+            .await;
+        assert_eq!(status, StatusCode::CREATED, "{kind:?}: {body}");
+
+        let uri = format!("{}/lookup?names=Alpha%20Item,Secret,nobody-has-this", kind.list());
+        let (status, found, _) = h.call("GET", &uri, Some("tenant-a"), None, None).await;
+        assert_eq!(status, StatusCode::OK, "{kind:?}: {found}");
+        assert_eq!(field_names(&found), ["items"], "{kind:?} envelope");
+        assert_eq!(slugs(&found), ["alpha", "beta"], "{kind:?}: {found}");
+
+        let alpha = find(&found, "alpha");
+        let mut expected = vec![
+            "latest_version",
+            "name",
+            "owner_tenant",
+            "slug",
+            "state",
+            "takedown_reason",
+            "visibility",
+        ];
+        expected.push(kind.bundle_field());
+        expected.sort();
+        assert_eq!(field_names(alpha), expected, "{kind:?} lookup item");
+        assert_eq!(alpha["state"], "active", "{kind:?}");
+        assert_eq!(alpha["latest_version"], "1.0.0", "{kind:?}");
+        assert_eq!(
+            alpha[kind.bundle_field()],
+            json!(kind.install_url("alpha", "1.0.0")),
+            "{kind:?}: the lookup link must be the same address as the listing"
+        );
+
+        // A stranger sees the public one and not the private one.
+        let (_, found, _) = h.call("GET", &uri, Some("tenant-b"), None, None).await;
+        assert_eq!(slugs(&found), ["alpha"], "{kind:?}");
+
+        // Withdrawn entries still answer: that is why the host asks.
+        let (status, _, _) = h
+            .call("POST", &kind.action("alpha", "withdraw"), Some("tenant-a"), Some(json!({})), None)
+            .await;
+        assert_eq!(status, StatusCode::OK, "{kind:?} withdraw");
+        let uri = format!("{}/lookup?names=Alpha%20Item", kind.list());
+        let (_, found, _) = h.call("GET", &uri, Some("tenant-a"), None, None).await;
+        assert_eq!(found["items"][0]["state"], "withdrawn", "{kind:?}: {found}");
+    }
+}
+
+/// A dry run answers with the same envelope on both planes and never writes.
+#[tokio::test]
+async fn validate_reports_the_same_shape_on_both_planes() {
+    for kind in Kind::ALL {
+        let h = Harness::new();
+        let body = |version: &str, files: Value| match kind {
+            Kind::Skill => json!({
+                "name": "Demo Skill", "slug": "alpha", "version": version,
+                "visibility": "public", "files": files
+            }),
+            Kind::Agent => json!({
+                "slug": "alpha", "version": version,
+                "visibility": "public", "files": files
+            }),
+        };
+        let uri = format!("{}/validate", kind.list());
+
+        // A clean bundle: no problems, nothing published.
+        let (status, answer, _) = h
+            .call("POST", &uri, Some("tenant-a"), Some(body("1.0.0", kind.files())), None)
+            .await;
+        assert_eq!(status, StatusCode::OK, "{kind:?}: {answer}");
+        assert_eq!(
+            field_names(&answer),
+            [
+                "existing",
+                "file_count",
+                "files",
+                "limits",
+                "manifest",
+                "name",
+                "next_version",
+                "ok",
+                "problems",
+                "size_bytes",
+                "slug",
+                "version",
+                "visibility",
+            ],
+            "{kind:?} envelope"
+        );
+        assert_eq!(answer["ok"], true, "{kind:?}: {answer}");
+        assert_eq!(answer["slug"], "alpha", "{kind:?}: {answer}");
+        assert!(answer["existing"].is_null(), "{kind:?}: {answer}");
+        assert!(answer["manifest"].is_object(), "{kind:?}: {answer}");
+        assert_eq!(
+            field_names(&answer["limits"]),
+            ["max_bundle_bytes", "max_file_bytes", "max_files"],
+            "{kind:?}"
+        );
+        let (_, listing, _) = h.call("GET", kind.list(), Some("tenant-a"), None, None).await;
+        assert_eq!(listing["total"], 0, "{kind:?} dry run wrote a row");
+
+        // A broken bundle explains itself, and still writes nothing.
+        let (status, answer, _) = h
+            .call(
+                "POST",
+                &uri,
+                Some("tenant-a"),
+                Some(body("1.0.0", json!({ "notes.txt": "no manifest here" }))),
+                None,
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{kind:?}: {answer}");
+        assert_eq!(answer["ok"], false, "{kind:?}: {answer}");
+        assert!(
+            !answer["problems"].as_array().unwrap().is_empty(),
+            "{kind:?}: {answer}"
+        );
+        let (_, listing, _) = h.call("GET", kind.list(), Some("tenant-a"), None, None).await;
+        assert_eq!(listing["total"], 0, "{kind:?} rejected bundle was published");
+
+        // Once the slug is real, the same payload reports the collision.
+        let (status, _) = kind.publish(&h, "tenant-a", "alpha", "1.0.0", "public").await;
+        assert_eq!(status, StatusCode::CREATED, "{kind:?}");
+        let (status, answer, _) = h
+            .call("POST", &uri, Some("tenant-a"), Some(body("1.0.0", kind.files())), None)
+            .await;
+        assert_eq!(status, StatusCode::OK, "{kind:?}: {answer}");
+        assert_eq!(answer["ok"], false, "{kind:?}: {answer}");
+        assert_eq!(answer["problems"][0]["code"], "version_exists", "{kind:?}: {answer}");
+        assert_eq!(answer["next_version"], "1.0.1", "{kind:?}: {answer}");
+        assert_eq!(answer["existing"]["mine"], true, "{kind:?}: {answer}");
+        assert_eq!(answer["existing"]["state"], "active", "{kind:?}: {answer}");
     }
 }
