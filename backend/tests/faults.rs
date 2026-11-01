@@ -123,8 +123,8 @@ async fn a_download_failure_is_not_a_missing_package() {
     }
 }
 
-/// A listing whose per-row subqueries cannot run must not degrade into an empty
-/// market: "no packages" and "the database is down" are different answers.
+/// A listing whose table cannot be read must not degrade into an empty market:
+/// "no packages" and "the database is down" are different answers.
 #[tokio::test]
 async fn a_listing_failure_is_not_an_empty_market() {
     for kind in Kind::ALL {
@@ -132,20 +132,49 @@ async fn a_listing_failure_is_not_an_empty_market() {
         let (status, body) = kind.publish(&h, "tenant-a", "alpha", "1.0.0").await;
         assert_eq!(status, StatusCode::CREATED, "{kind:?}: {body}");
 
-        let versions = kind.versions();
-        kind.rename(&h, versions, "broken_versions");
+        let table = kind.table();
+        kind.rename(&h, table, "broken_listing");
         let (status, listing, _) = h
             .call("GET", kind.list(), Some("tenant-b"), None, None)
             .await;
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{kind:?}: {listing}");
         assert_eq!(listing["error"]["code"], "db_error", "{kind:?}: {listing}");
 
-        kind.restore(&h, versions, "broken_versions");
+        kind.restore(&h, table, "broken_listing");
         let (status, listing, _) = h
             .call("GET", kind.list(), Some("tenant-b"), None, None)
             .await;
         assert_eq!(status, StatusCode::OK, "{kind:?}: {listing}");
         assert_eq!(listing["total"], 1, "{kind:?}");
+    }
+}
+
+/// A page of the market reads one row per entry: the version count, the total
+/// size and the newest labels are materialized on the entry row, so the listing
+/// keeps working while the version tables are unreachable. This is the property
+/// that makes a page cheap, so it is worth failing loudly when it regresses.
+#[tokio::test]
+async fn a_listing_does_not_need_the_version_tables() {
+    for kind in Kind::ALL {
+        let h = Harness::new();
+        let (status, body) = kind.publish(&h, "tenant-a", "alpha", "1.0.0").await;
+        assert_eq!(status, StatusCode::CREATED, "{kind:?}: {body}");
+
+        let versions = kind.versions();
+        kind.rename(&h, versions, "broken_versions");
+
+        let (status, listing, _) = h
+            .call("GET", kind.list(), Some("tenant-b"), None, None)
+            .await;
+        assert_eq!(status, StatusCode::OK, "{kind:?}: {listing}");
+        let item = &listing["items"][0];
+        assert_eq!(item["versions"], 1, "{kind:?}: {listing}");
+        assert!(
+            item["description"].as_str().is_some_and(|text| !text.is_empty()),
+            "{kind:?}: {listing}"
+        );
+
+        kind.restore(&h, versions, "broken_versions");
     }
 }
 

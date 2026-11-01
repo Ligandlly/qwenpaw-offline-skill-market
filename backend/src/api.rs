@@ -208,6 +208,10 @@ fn publish_sync(
             visibility: &body.visibility,
             name: &checked.name,
             description: None,
+            manifest_text: checked
+                .files
+                .get(limits::MANIFEST)
+                .and_then(|file| file.as_text()),
             file_count,
             skill_count: None,
             size_bytes: checked.size_bytes,

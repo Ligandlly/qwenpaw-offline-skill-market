@@ -9,54 +9,48 @@ use serde_json::{json, Value};
 use crate::limits;
 use crate::state::Shared;
 
-/// Projection for a skill listing row. `description` is not a column on
-/// purpose: it lives in the latest version's `SKILL.md`, which is the only
-/// source that cannot fall out of sync — and it works for rows published
-/// before the column existed. The key needs quoting: `$.SKILL.md` would be
-/// read as a nested path.
+/// Projection for a skill listing row.
+///
+/// Everything a page shows comes from the entry row: `manifest_text` is the
+/// latest `SKILL.md` and `version_count`/`size_bytes`/`updated_at` are the
+/// version summary, all materialized by [`super::write::store`]. They used to be
+/// correlated subqueries over the version table — one full scan plus a
+/// `json_extract` per returned row.
 pub(crate) const SKILL_SELECT: &str = r#"
 SELECT s.slug, s.name, s.owner_tenant, t.display_name AS owner_name, s.visibility,
-       s.latest_version,
-       s.created_at, s.withdrawn_at, s.takedown_at, s.takedown_reason,
-       s.download_count,
-       COALESCE((SELECT MAX(v.created_at) FROM skill_versions v WHERE v.slug = s.slug),
-                s.created_at) AS updated_at,
-       (SELECT json_extract(v.bundle_json, '$."SKILL.md"')
-          FROM skill_versions v
-         WHERE v.slug = s.slug AND v.version = s.latest_version) AS manifest,
-       COALESCE((SELECT COUNT(*) FROM skill_versions v WHERE v.slug = s.slug), 0) AS versions,
-       COALESCE((SELECT SUM(size_bytes) FROM skill_versions v WHERE v.slug = s.slug), 0) AS size_bytes
+       s.latest_version, s.created_at, s.withdrawn_at, s.takedown_at,
+       s.takedown_reason, s.download_count, s.updated_at,
+       s.manifest_text AS manifest,
+       s.version_count AS versions,
+       s.size_bytes
 FROM skills s
 LEFT JOIN tenants t ON t.id = s.owner_tenant
 "#;
 
-/// Projection for an agent listing row. An agent carries its own `description`
-/// column and counts the skills declared by its latest version.
+/// Projection for an agent listing row: the same materialized summary as the
+/// skill plane, plus the skill count of the latest version (which the skill
+/// plane has no column for).
 pub(crate) const AGENT_SELECT: &str = r#"
 SELECT a.slug, a.name, a.description, a.owner_tenant, t.display_name AS owner_name,
        a.visibility, a.latest_version, a.created_at, a.withdrawn_at,
-       a.takedown_at, a.takedown_reason, a.download_count,
-       COALESCE((SELECT MAX(v.created_at) FROM agent_versions v WHERE v.slug = a.slug),
-                a.created_at) AS updated_at,
-       COALESCE((SELECT COUNT(*) FROM agent_versions v WHERE v.slug = a.slug), 0) AS versions,
-       COALESCE((SELECT SUM(size_bytes) FROM agent_versions v WHERE v.slug = a.slug), 0) AS size_bytes,
-       COALESCE((SELECT skill_count FROM agent_versions v
-                  WHERE v.slug = a.slug AND v.version = a.latest_version), 0) AS skill_count
+       a.takedown_at, a.takedown_reason, a.download_count, a.updated_at,
+       a.version_count AS versions,
+       a.size_bytes,
+       a.skill_count
 FROM agents a
 LEFT JOIN tenants t ON t.id = a.owner_tenant
 "#;
 
 /// Where a plane keeps the labels it serves alongside an entry.
 ///
-/// The agent plane reads them from the version's own manifest so a later
-/// publish cannot rewrite the payload of a version that was already handed
-/// out; the skill plane keeps its name on the entry row and derives its
-/// description from the latest `SKILL.md`.
+/// The agent plane stores a description on the entry row; the skill plane keeps
+/// the latest `SKILL.md` there instead, so both planes serve the labels of their
+/// newest version without touching the version tables.
 #[derive(Clone, Copy)]
 pub enum Labels {
     /// A plain column on the entry row.
     Column,
-    /// The `manifest` column of the projection (latest `SKILL.md`).
+    /// The latest `SKILL.md`, materialized on the entry row as `manifest_text`.
     ManifestColumn,
     /// A file inside the version's own bundle.
     File(&'static str),

@@ -273,6 +273,32 @@ async fn listing_payload_has_a_fixed_shape() {
     assert_eq!(agents_only, ["bundle_url", "skill_count"]);
 }
 
+/// The search box is text, not a pattern: `%` and `_` have to match themselves
+/// instead of quietly turning every query into "match everything".
+#[tokio::test]
+async fn search_treats_wildcards_as_text() {
+    for kind in Kind::ALL {
+        let h = Harness::new();
+        let (status, body) = kind.publish(&h, "tenant-a", "alpha", "1.0.0", "public").await;
+        assert_eq!(status, StatusCode::CREATED, "{kind:?}: {body}");
+
+        for wildcard in ["%25", "_", "%25%25"] {
+            let uri = format!("{}?q={wildcard}", kind.list());
+            let (status, listing, _) = h.call("GET", &uri, Some("tenant-b"), None, None).await;
+            assert_eq!(status, StatusCode::OK, "{kind:?}: {listing}");
+            assert_eq!(
+                listing["total"], 0,
+                "{kind:?} `{uri}` matched everything: {listing}"
+            );
+        }
+
+        let uri = format!("{}?q=alp", kind.list());
+        let (status, listing, _) = h.call("GET", &uri, Some("tenant-b"), None, None).await;
+        assert_eq!(status, StatusCode::OK, "{kind:?}: {listing}");
+        assert_eq!(listing["total"], 1, "{kind:?} plain search broke: {listing}");
+    }
+}
+
 #[tokio::test]
 async fn pagination_counts_every_row_but_returns_one_page() {
     for kind in Kind::ALL {

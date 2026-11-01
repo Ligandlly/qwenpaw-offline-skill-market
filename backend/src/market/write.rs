@@ -9,6 +9,7 @@ use tracing::{info, warn};
 use crate::db::{audit_kind, now};
 use crate::error::{ApiError, ApiResult};
 
+use super::entity::Labels;
 use super::Entity;
 
 /// Records that this tenant published: `display_name` is only written when the
@@ -78,9 +79,11 @@ pub(crate) struct Publish<'a> {
     pub version: &'a str,
     pub visibility: &'a str,
     pub name: &'a str,
-    /// Only the agent plane stores a description column; the skill plane reads
-    /// it out of the bundle on demand.
+    /// The agent plane's label column: the description the manifest declares.
     pub description: Option<&'a str>,
+    /// The skill plane's label columns: the latest `SKILL.md` itself, so the
+    /// listing can read the description without opening a bundle.
+    pub manifest_text: Option<&'a str>,
     pub file_count: usize,
     /// Only the agent plane counts the skills a bundle ships.
     pub skill_count: Option<i64>,
@@ -113,6 +116,7 @@ pub(crate) fn store(
         visibility,
         name,
         description,
+        manifest_text,
         file_count,
         skill_count,
         size_bytes,
@@ -120,6 +124,7 @@ pub(crate) fn store(
         bundle_json,
         previous,
     } = publish;
+    let at = now();
     let tx = db.unchecked_transaction().map_err(ApiError::db)?;
     // rusqlite refuses a named parameter the statement does not declare, so the
     // optional columns are bound only when this plane actually has them.
@@ -133,7 +138,7 @@ pub(crate) fn store(
                 ":owner": tenant,
                 ":visibility": visibility,
                 ":version": version,
-                ":now": now(),
+                ":now": at,
             },
         ),
         None => tx.execute(
@@ -144,7 +149,7 @@ pub(crate) fn store(
                 ":owner": tenant,
                 ":visibility": visibility,
                 ":version": version,
-                ":now": now(),
+                ":now": at,
             },
         ),
     }
@@ -161,7 +166,7 @@ pub(crate) fn store(
                 ":file_count": file_count as i64,
                 ":skill_count": skill_count,
                 ":bundle_json": bundle_json,
-                ":now": now(),
+                ":now": at,
             },
         ),
         None => tx.execute(
@@ -173,7 +178,7 @@ pub(crate) fn store(
                 ":size_bytes": size_bytes as i64,
                 ":file_count": file_count as i64,
                 ":bundle_json": bundle_json,
-                ":now": now(),
+                ":now": at,
             },
         ),
     }
@@ -185,6 +190,18 @@ pub(crate) fn store(
             format!("版本 {version} 已存在且不可修改，请不要重复发布同一个版本号"),
         ));
     }
+
+    // The version summary the listing serves, kept current here so no reader has
+    // to scan the version table.
+    tx.execute(
+        &format!(
+            "UPDATE {} SET version_count = version_count + 1, size_bytes = size_bytes + ?2,
+                 updated_at = ?3 WHERE slug = ?1",
+            entity.table
+        ),
+        params![slug, size_bytes as i64, at],
+    )
+    .map_err(ApiError::db)?;
 
     // The pointer only moves forward: a late publish of an old version must not
     // roll the market back. The name travels with the pointer, so re-publishing
@@ -202,12 +219,35 @@ pub(crate) fn store(
             params![slug, version, name],
         )
         .map_err(ApiError::db)?;
-        if let Some(description) = description {
-            tx.execute(
-                &format!("UPDATE {} SET description = ?2 WHERE slug = ?1", entity.table),
-                params![slug, description],
-            )
-            .map_err(ApiError::db)?;
+        // The labels travel with the pointer, so re-publishing an older version
+        // cannot relabel the listing either.
+        match entity.description_from {
+            Labels::Column => {
+                if let Some(description) = description {
+                    tx.execute(
+                        &format!("UPDATE {} SET description = ?2 WHERE slug = ?1", entity.table),
+                        params![slug, description],
+                    )
+                    .map_err(ApiError::db)?;
+                }
+                if let Some(skill_count) = skill_count {
+                    tx.execute(
+                        &format!("UPDATE {} SET skill_count = ?2 WHERE slug = ?1", entity.table),
+                        params![slug, skill_count],
+                    )
+                    .map_err(ApiError::db)?;
+                }
+            }
+            Labels::ManifestColumn => {
+                if let Some(manifest_text) = manifest_text {
+                    tx.execute(
+                        &format!("UPDATE {} SET manifest_text = ?2 WHERE slug = ?1", entity.table),
+                        params![slug, manifest_text],
+                    )
+                    .map_err(ApiError::db)?;
+                }
+            }
+            Labels::File(_) => {}
         }
     }
     // Publishing again is also how an owner un-withdraws: the new version is

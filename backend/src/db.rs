@@ -47,9 +47,25 @@ CREATE TABLE IF NOT EXISTS skills (
     takedown_reason  TEXT,
     -- Successful bundle fetches (installs). A counter, not an audit row:
     -- a dashboard needs cheap SUM(), and old rows start at zero.
-    download_count   INTEGER NOT NULL DEFAULT 0
+    download_count   INTEGER NOT NULL DEFAULT 0,
+    -- The latest `SKILL.md`, kept here so a listing row costs one column read
+    -- instead of a `json_extract` over the newest (up to 2 MiB) bundle. Only
+    -- `market::store` writes it, and only when a version takes over as latest.
+    manifest_text    TEXT,
+    -- Materialized summary of the version history: a listing serves these for
+    -- every row, and recomputing them with correlated subqueries meant one
+    -- full scan of the version table per returned row. Maintained by
+    -- `market::store` inside the publish transaction.
+    version_count    INTEGER NOT NULL DEFAULT 0,
+    size_bytes       INTEGER NOT NULL DEFAULT 0,
+    updated_at       INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_skills_owner ON skills(owner_tenant);
+-- The listing filters on exactly this triple; keeping the index partial keeps
+-- withdrawn and taken-down rows (which no market page returns) out of it.
+CREATE INDEX IF NOT EXISTS idx_skills_live
+    ON skills(visibility, owner_tenant)
+ WHERE withdrawn_at IS NULL AND takedown_at IS NULL;
 
 CREATE TABLE IF NOT EXISTS skill_versions (
     slug        TEXT NOT NULL REFERENCES skills(slug) ON DELETE CASCADE,
@@ -75,9 +91,18 @@ CREATE TABLE IF NOT EXISTS agents (
     takedown_at      INTEGER,
     takedown_by      TEXT,
     takedown_reason  TEXT,
-    download_count   INTEGER NOT NULL DEFAULT 0
+    download_count   INTEGER NOT NULL DEFAULT 0,
+    -- Declared skills of the latest version, for the same reason as
+    -- `version_count` below: the listing serves it for every row.
+    skill_count      INTEGER NOT NULL DEFAULT 0,
+    version_count    INTEGER NOT NULL DEFAULT 0,
+    size_bytes       INTEGER NOT NULL DEFAULT 0,
+    updated_at       INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_agents_owner ON agents(owner_tenant);
+CREATE INDEX IF NOT EXISTS idx_agents_live
+    ON agents(visibility, owner_tenant)
+ WHERE withdrawn_at IS NULL AND takedown_at IS NULL;
 
 CREATE TABLE IF NOT EXISTS agent_versions (
     slug        TEXT NOT NULL REFERENCES agents(slug) ON DELETE CASCADE,
@@ -101,7 +126,9 @@ CREATE TABLE IF NOT EXISTS audit_log (
     version TEXT,
     detail  TEXT
 );
-CREATE INDEX IF NOT EXISTS idx_audit_at ON audit_log(at);
+-- No index on `at`: the log is served `ORDER BY id DESC`, which is the rowid
+-- order, and nothing filters by timestamp. The old `idx_audit_at` only cost
+-- writes.
 "#;
 
 pub fn open(path: &Path) -> rusqlite::Result<Connection> {
@@ -141,6 +168,42 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         "agents",
         "download_count",
         "INTEGER NOT NULL DEFAULT 0",
+    )?;
+    for (table, column, definition) in [
+        ("skills", "manifest_text", "TEXT"),
+        ("skills", "version_count", "INTEGER NOT NULL DEFAULT 0"),
+        ("skills", "size_bytes", "INTEGER NOT NULL DEFAULT 0"),
+        ("skills", "updated_at", "INTEGER NOT NULL DEFAULT 0"),
+        ("agents", "skill_count", "INTEGER NOT NULL DEFAULT 0"),
+        ("agents", "version_count", "INTEGER NOT NULL DEFAULT 0"),
+        ("agents", "size_bytes", "INTEGER NOT NULL DEFAULT 0"),
+        ("agents", "updated_at", "INTEGER NOT NULL DEFAULT 0"),
+    ] {
+        ensure_column(conn, table, column, definition)?;
+    }
+    // A market that predates the summary columns still has rows: fill them in
+    // once, from the same source `market::store` uses.
+    conn.execute_batch(
+        r#"
+UPDATE skills SET
+    version_count = (SELECT COUNT(*) FROM skill_versions v WHERE v.slug = skills.slug),
+    size_bytes    = (SELECT COALESCE(SUM(size_bytes), 0) FROM skill_versions v WHERE v.slug = skills.slug),
+    updated_at    = COALESCE((SELECT MAX(created_at) FROM skill_versions v WHERE v.slug = skills.slug),
+                             skills.created_at),
+    manifest_text = (SELECT json_extract(v.bundle_json, '$."SKILL.md"')
+                       FROM skill_versions v
+                      WHERE v.slug = skills.slug AND v.version = skills.latest_version)
+ WHERE updated_at = 0;
+
+UPDATE agents SET
+    version_count = (SELECT COUNT(*) FROM agent_versions v WHERE v.slug = agents.slug),
+    size_bytes    = (SELECT COALESCE(SUM(size_bytes), 0) FROM agent_versions v WHERE v.slug = agents.slug),
+    updated_at    = COALESCE((SELECT MAX(created_at) FROM agent_versions v WHERE v.slug = agents.slug),
+                             agents.created_at),
+    skill_count   = COALESCE((SELECT skill_count FROM agent_versions v
+                               WHERE v.slug = agents.slug AND v.version = agents.latest_version), 0)
+ WHERE updated_at = 0;
+"#,
     )?;
     Ok(())
 }

@@ -214,6 +214,65 @@ async fn the_listing_follows_the_newest_version_not_the_last_publish() {
     }
 }
 
+/// A listing row carries a summary of its own version history — version count,
+/// total size, last update and the labels of the newest version. A page used to
+/// recompute all four per row with correlated subqueries.
+#[tokio::test]
+async fn listing_summary_tracks_the_version_history() {
+    for kind in Kind::ALL {
+        let h = Harness::new();
+        let (status, body) = kind
+            .publish_with(&h, "tenant-a", "alpha", "1.0.0", "public", "alpha")
+            .await;
+        assert_eq!(status, StatusCode::CREATED, "{kind:?}: {body}");
+
+        let (_, listing, _) = h.call("GET", kind.list(), Some("tenant-a"), None, None).await;
+        let item = find(&listing, "alpha");
+        let one_version = item["size_bytes"].as_i64().expect("size_bytes");
+        assert!(one_version > 0, "{kind:?}: {item}");
+        assert_eq!(item["versions"], 1, "{kind:?}: {item}");
+        let first_update = item["updated_at"].as_i64().expect("updated_at");
+
+        // Both markers are five characters, so the two bundles are the same
+        // size and the total has to double exactly.
+        let (status, body) = kind
+            .publish_with(&h, "tenant-a", "alpha", "1.1.0", "public", "bravo")
+            .await;
+        assert_eq!(status, StatusCode::CREATED, "{kind:?}: {body}");
+
+        let (_, listing, _) = h.call("GET", kind.list(), Some("tenant-a"), None, None).await;
+        let item = find(&listing, "alpha");
+        assert_eq!(item["versions"], 2, "{kind:?}: {item}");
+        assert_eq!(
+            item["size_bytes"].as_i64(),
+            Some(one_version * 2),
+            "{kind:?} total size: {item}"
+        );
+        assert_eq!(
+            item["description"], "bravo",
+            "{kind:?} labels must follow the newest version: {item}"
+        );
+        assert!(
+            item["updated_at"].as_i64() >= Some(first_update),
+            "{kind:?} update stamp went backwards: {item}"
+        );
+
+        // A duplicate of an old version is refused before anything is counted.
+        let (status, _) = kind
+            .publish_with(&h, "tenant-a", "alpha", "1.0.0", "public", "alpha")
+            .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{kind:?}");
+        let (_, listing, _) = h.call("GET", kind.list(), Some("tenant-a"), None, None).await;
+        let item = find(&listing, "alpha");
+        assert_eq!(item["versions"], 2, "{kind:?}: {item}");
+        assert_eq!(
+            item["size_bytes"].as_i64(),
+            Some(one_version * 2),
+            "{kind:?}: {item}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn a_published_version_is_immutable() {
     for kind in Kind::ALL {

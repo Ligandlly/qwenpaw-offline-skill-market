@@ -520,6 +520,7 @@ fn publish_sync(
             visibility: &body.visibility,
             name: &name,
             description: Some(&description),
+            manifest_text: None,
             file_count: checked.file_count,
             skill_count: Some(checked.skill_count as i64),
             size_bytes: checked.size_bytes,

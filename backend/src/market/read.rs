@@ -31,7 +31,7 @@ pub(crate) fn list_page(
 ) -> ApiResult<Value> {
     let limit = query.limit.clamp(1, 50);
     let offset = page_offset(query.page, limit)?;
-    let pattern = format!("%{}%", query.q.trim());
+    let pattern = like_pattern(&query.q);
     let order = (entity.order)(&query.sort);
     let alias = entity.alias;
 
@@ -40,7 +40,7 @@ pub(crate) fn list_page(
     let filter = format!(
         "{alias}.takedown_at IS NULL AND {alias}.withdrawn_at IS NULL
            AND ({alias}.visibility = 'public' OR {alias}.owner_tenant = ?1)
-           AND ({alias}.slug LIKE ?2 OR {alias}.name LIKE ?2)"
+           AND ({alias}.slug LIKE ?2 ESCAPE '\\' OR {alias}.name LIKE ?2 ESCAPE '\\')"
     );
     let total: i64 = db
         .query_row(
@@ -103,6 +103,25 @@ pub(crate) fn list_owned(
     Ok(json!({ "items": entries_to_json(entity, &items) }))
 }
 
+/// `LIKE` pattern for a substring search.
+///
+/// `%` and `_` are wildcards, so a search for `100%` would otherwise match
+/// everything: escaping them (and the escape character itself) makes the query
+/// mean the text the operator typed. Every clause using the pattern declares
+/// `ESCAPE '\'`.
+fn like_pattern(q: &str) -> String {
+    let mut pattern = String::with_capacity(q.len() + 2);
+    pattern.push('%');
+    for ch in q.trim().chars() {
+        if matches!(ch, '\\' | '%' | '_') {
+            pattern.push('\\');
+        }
+        pattern.push(ch);
+    }
+    pattern.push('%');
+    pattern
+}
+
 /// `GET /admin/api/{skills,agents}`: the unfiltered operator view.
 pub(crate) fn list_admin(
     db: &Connection,
@@ -112,9 +131,9 @@ pub(crate) fn list_admin(
     public_url: &str,
 ) -> ApiResult<Value> {
     let alias = entity.alias;
-    let pattern = format!("%{}%", q.trim());
+    let pattern = like_pattern(q);
     let sql = format!(
-        "{} WHERE {alias}.slug LIKE ?1 OR {alias}.name LIKE ?1
+        "{} WHERE {alias}.slug LIKE ?1 ESCAPE '\\' OR {alias}.name LIKE ?1 ESCAPE '\\'
          ORDER BY {alias}.created_at DESC LIMIT ?2",
         entity.select
     );
