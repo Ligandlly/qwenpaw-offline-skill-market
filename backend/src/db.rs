@@ -137,38 +137,62 @@ pub fn open(path: &Path) -> rusqlite::Result<Connection> {
             let _ = std::fs::create_dir_all(dir);
         }
     }
-    let conn = Connection::open(path)?;
+    let mut conn = Connection::open(path)?;
     conn.busy_timeout(BUSY_TIMEOUT)?;
     conn.execute_batch(SCHEMA)?;
-    migrate(&conn)?;
+    migrate(&mut conn)?;
     Ok(conn)
 }
 
 pub fn open_memory() -> rusqlite::Result<Connection> {
-    let conn = Connection::open_in_memory()?;
+    let mut conn = Connection::open_in_memory()?;
     conn.busy_timeout(BUSY_TIMEOUT)?;
     conn.execute_batch(SCHEMA)?;
-    migrate(&conn)?;
+    migrate(&mut conn)?;
     Ok(conn)
 }
 
-/// `CREATE TABLE IF NOT EXISTS` cannot add columns to a market that is
-/// already running, so older databases get the new ones here. Idempotent.
-fn migrate(conn: &Connection) -> rusqlite::Result<()> {
-    ensure_column(conn, "tenants", "display_name", "TEXT")?;
-    ensure_column(conn, "audit_log", "kind", "TEXT NOT NULL DEFAULT 'skill'")?;
+/// How far the on-disk schema has come. Bumped whenever `SCHEMA` grows a column
+/// or a step needs a backfill; `PRAGMA user_version` records it per database.
+pub const SCHEMA_VERSION: i64 = 2;
+
+/// `CREATE TABLE IF NOT EXISTS` cannot add columns to a market that is already
+/// running, so older databases are brought forward here.
+///
+/// Steps run once per database (tracked in `user_version`), which is why a
+/// healthy restart no longer re-checks every column or re-runs the backfill.
+/// A database newer than this build is refused rather than half-understood.
+pub fn migrate(conn: &mut Connection) -> rusqlite::Result<()> {
+    let current: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    if current > SCHEMA_VERSION {
+        return Err(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(1),
+            Some(format!(
+                "数据库 schema 是 {current}，本程序只支持到 {SCHEMA_VERSION}；\
+                 请升级程序，或用备份的旧库启动"
+            )),
+        ));
+    }
+    if current == SCHEMA_VERSION {
+        return Ok(());
+    }
+    let tx = conn.transaction()?;
+    // 1: columns added after the first release.
+    ensure_column(&tx, "tenants", "display_name", "TEXT")?;
+    ensure_column(&tx, "audit_log", "kind", "TEXT NOT NULL DEFAULT 'skill'")?;
     ensure_column(
-        conn,
+        &tx,
         "skills",
         "download_count",
         "INTEGER NOT NULL DEFAULT 0",
     )?;
     ensure_column(
-        conn,
+        &tx,
         "agents",
         "download_count",
         "INTEGER NOT NULL DEFAULT 0",
     )?;
+    // 2: the listing serves these columns instead of aggregating per row.
     for (table, column, definition) in [
         ("skills", "manifest_text", "TEXT"),
         ("skills", "version_count", "INTEGER NOT NULL DEFAULT 0"),
@@ -179,11 +203,11 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         ("agents", "size_bytes", "INTEGER NOT NULL DEFAULT 0"),
         ("agents", "updated_at", "INTEGER NOT NULL DEFAULT 0"),
     ] {
-        ensure_column(conn, table, column, definition)?;
+        ensure_column(&tx, table, column, definition)?;
     }
     // A market that predates the summary columns still has rows: fill them in
     // once, from the same source `market::store` uses.
-    conn.execute_batch(
+    tx.execute_batch(
         r#"
 UPDATE skills SET
     version_count = (SELECT COUNT(*) FROM skill_versions v WHERE v.slug = skills.slug),
@@ -205,6 +229,9 @@ UPDATE agents SET
  WHERE updated_at = 0;
 "#,
     )?;
+    tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+    tx.commit()?;
+    tracing::info!(from = current, to = SCHEMA_VERSION, "schema: migrated");
     Ok(())
 }
 

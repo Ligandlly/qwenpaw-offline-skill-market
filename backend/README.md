@@ -57,6 +57,11 @@ $env:MARKET_PUBLIC_URL="http://10.137.157.214:8080"; cargo run
 | `MARKET_MAX_FILE_BYTES` | `262144`（256 KiB） | 单文件字节 |
 | `MARKET_REQUEST_TIMEOUT_MS` | `30000` | 单个请求的处理上限（毫秒），超时返回 503 `timeout`。默认值放宽是为上传大包留余量；与实际网络无关的抖动可调小 |
 
+配置会在启动时校验一遍，不合法的值直接**拒绝启动**（退出码 2，`stderr` 打印哪一项错了）：
+`MARKET_BIND` 必须 `host:port` 且端口非 0；`MARKET_PUBLIC_URL` 必须以 `http://` 或 `https://` 开头并有主机名
+（它决定每个 `install_url`，相对地址等于发出去装不上）；三个 `MARKET_MAX_*` 必须 > 0（0 会让所有发布被拒）；
+`ADMIN_PASSWORD` 空（生成随机密码）或至少 8 个字符；`MARKET_LOG` 必须是上面六个级别之一（拼错不再被静默忽略）。
+
 ## 两个身份面
 
 | 面 | 认证方式 | 谁在调用 |

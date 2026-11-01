@@ -422,7 +422,7 @@ python3 deploy/scripts/e2e.py --skip-a --skip-b \
 | 备份 | 停机或 `sqlite3 market.sqlite3 ".backup /backup/market-$(date +%F).sqlite3"`；包体也存在库里，一个文件就是全部 |
 | 恢复 | 停后端 → 覆盖 sqlite 文件 → 启动；`-wal`/`-shm` 一并清掉 |
 | 停后端 | `docker stop` / `systemctl stop`（发 `SIGTERM`）会优雅退出：停止接新请求、等在途请求完成、回写内存计数后退出码 0；`kill -9` 会丢掉最后几秒（最多 5 秒）的下载计数 |
-| 升级后端 | 换二进制/镜像，重启；schema 目前是 `CREATE TABLE IF NOT EXISTS`，无迁移步骤 |
+| 升级后端 | 换二进制/镜像，重启；库结构按 `PRAGMA user_version` 自动升级（每个版本只跑一次，旧的技能/智能体数据会一次性回填列表字段），库比程序新时拒绝启动而不是半读 |
 | 升级插件 | `unzip <新 zip>` → `qwenpaw plugin install ./offline-market --force`（App 运行时可直接 `plugin install <新 zip> --force`）后重启 runtime |
 
 ---

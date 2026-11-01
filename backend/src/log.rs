@@ -13,9 +13,20 @@ use tracing::level_filters::LevelFilter;
 use tracing::{error, info, warn};
 
 /// Parse a level name (`off`/`error`/`warn`/`info`/`debug`/`trace`).
+///
+/// Config validates through here, so a typo is a start-up error instead of a
+/// silently ignored setting.
+pub fn parse_level(spec: &str) -> Result<LevelFilter, String> {
+    LevelFilter::from_str(spec.trim()).map_err(|_| {
+        format!(
+            "未知的日志级别 {spec:?}，可选 off / error / warn / info / debug / trace"
+        )
+    })
+}
+
 /// Anything unknown falls back to `info`.
 pub fn level(spec: &str) -> LevelFilter {
-    LevelFilter::from_str(spec.trim()).unwrap_or(LevelFilter::INFO)
+    parse_level(spec).unwrap_or(LevelFilter::INFO)
 }
 
 /// Install the global subscriber. Second calls are ignored (tests, reloads).

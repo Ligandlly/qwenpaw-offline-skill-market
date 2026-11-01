@@ -3,7 +3,16 @@ use tracing::info;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let cfg = Config::from_env();
+    let cfg = match Config::from_env() {
+        Ok(cfg) => cfg,
+        Err(err) => {
+            // Nothing has been logged yet: this has to reach the operator
+            // verbatim, and a config error is never worth retrying in-place.
+            eprintln!("配置错误：{err}");
+            eprintln!("（各项含义见 backend/README.md 的环境变量表）");
+            std::process::exit(2);
+        }
+    };
     log::init(&cfg.log_level);
 
     let conn = db::open(&cfg.db_path)?;
