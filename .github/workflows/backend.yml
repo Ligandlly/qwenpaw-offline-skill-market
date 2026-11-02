@@ -54,7 +54,7 @@ jobs:
         run: cargo test --all-targets --locked
 
   build:
-    name: release build (linux x86_64)
+    name: release build (linux x86_64, static)
     needs: test
     runs-on: ubuntu-latest
     # the release asset upload needs write access; the workflow default is read
@@ -68,6 +68,17 @@ jobs:
 
       - name: Install Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          # musl target: the tarball binary must run on any x86_64 Linux without
+          # glibc version roulette (internal machines are often older distros).
+          target: x86_64-unknown-linux-musl
+
+      - name: Install musl toolchain
+        # rusqlite 是 bundled 的，要一个 musl 的 C 编译器编 sqlite3.c；
+        # binutils 提供下面断言静态链接用的 readelf
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends musl-tools binutils
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
@@ -75,7 +86,21 @@ jobs:
           workspaces: backend
 
       - name: Build release
-        run: cargo build --release --locked
+        run: cargo build --release --locked --target x86_64-unknown-linux-musl
+
+      - name: Assert the binary is really static
+        # 静态是这个发布物的全部卖点：悄悄退回动态链接的话，离线机器上会报
+        # "GLIBC_2.xx not found"。有 PT_INTERP 就不是静态。
+        run: |
+          set -euo pipefail
+          bin="target/x86_64-unknown-linux-musl/release/offline-market-backend"
+          command -v readelf >/dev/null || { echo "::error::readelf missing, cannot assert static linkage"; exit 1; }
+          file "$bin"
+          if readelf -l "$bin" | grep -q 'interpreter'; then
+            echo "::error::$bin is dynamically linked; the release tarball must be static"
+            exit 1
+          fi
+          ls -lh "$bin"
 
       - name: Package binary
         id: package
@@ -84,7 +109,7 @@ jobs:
           version="$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"(.*)".*/\1/')"
           name="offline-market-backend-${version}-linux-x86_64"
           mkdir -p "../dist/${name}/bin"
-          cp target/release/offline-market-backend "../dist/${name}/bin/"
+          cp target/x86_64-unknown-linux-musl/release/offline-market-backend "../dist/${name}/bin/"
           cp ../deploy/.env.example "../dist/${name}/" 2>/dev/null || true
           cp -r ../deploy/systemd "../dist/${name}/" 2>/dev/null || true
           tar -C ../dist -czf "../dist/${name}.tar.gz" "${name}"

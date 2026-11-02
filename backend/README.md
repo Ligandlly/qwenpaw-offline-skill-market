@@ -181,12 +181,35 @@ docker save -o offline-market-image.tar ghcr.io/ligandlly/qwenpaw-offline-skill-
 docker load -i offline-market-image.tar
 ```
 
-两个容易踩的点：
+一个容易踩的点：
 
-- **时钟**：apt 会拿本机时钟比仓库元数据的 `Date`，构建机时钟不准就报
-  `Release file ... is not valid yet`。Dockerfile 里已关掉这项检查（签名照验）。
 - **`/data` 属主**：进程以 `nobody` 跑，`/data` 必须归 `nobody`，否则建不出 SQLite 库
   （`unable to open database file`）。named volume 初始化时会继承镜像里的属主。
+
+### 镜像怎么做到小
+
+build 阶段用 `rust:1-alpine`（musl 工具链）编出**静态链接**的二进制，运行阶段只有
+`alpine` + 这一个文件：没有 apt、没有 libc 依赖、也没装 ca-certificates（服务只出 HTTP，
+不出 TLS）。`wget` 由 alpine 自带的 busybox 提供，compose 的 healthcheck 照旧能用。
+
+| | 镜像 | `docker save` tarball | 二进制 |
+| --- | --- | --- | --- |
+| debian-slim + apt | 113 MB | 116 MB | 6.7 MB（未 strip） |
+| alpine + musl 静态 | 13 MB | 9.5 MB | 4.6 MB（stripped） |
+
+体积来自三处：静态二进制换成 musl（省掉整个 libc/apt）、`Cargo.toml` 的
+`[profile.release]` 开了 `strip = "symbols"` + thin LTO + 单 codegen unit、
+运行阶段只剩 alpine 基础层。构建速度靠「依赖单独成层」：只改 `src/` 时不重编整棵依赖树。
+
+改 Dockerfile 时注意两个坑：
+
+- **mtime 与依赖层缓存**：dummy 源码编完依赖再 `COPY src`，docker 会把上下文里文件的
+  mtime 一起带过来（可能比 dummy 产物还旧），cargo 按 mtime 判新鲜度就会跳过本 crate 的
+  编译，镜像里躺着一个空壳二进制。`find src -name '*.rs' -exec touch {} +` 就是为这个。
+- **别加 `panic = "abort"`**：`backend/tests/transport.rs` 的
+  `a_panicking_query_fails_one_request_not_the_runtime` 依赖 unwind（一个坏请求不该拖垮整个进程）。
+
+镜像架构跟着构建机走：CI 固定 `linux/amd64`，在 arm64 机器上 build 出来的就是 arm64 镜像。
 
 ## 语义（都有测试覆盖）
 
@@ -281,4 +304,4 @@ docker run -p 8080:8080 -v $PWD/data:/data \
   offline-market:0.1
 ```
 
-离线环境：在有网的机器上 `cargo build --release`（或 build 镜像），把 `target/release/offline-market-backend` 静态二进制带进内网即可；运行期零依赖（SQLite 已 bundled 进二进制）。
+离线环境：在有网的机器上编 release 二进制（或 build 镜像），把二进制带进内网即可；运行期零依赖（SQLite 已 bundled 进二进制）。要**真静态链接**得走 musl：`rustup target add x86_64-unknown-linux-musl` + 装 musl 的 C 编译器（`musl-tools`），`cargo build --release --target x86_64-unknown-linux-musl`，产物在 `target/x86_64-unknown-linux-musl/release/offline-market-backend`。CI 的 Release tarball 和 `deploy/scripts/build-offline-bundle.sh` 都是这么编的（脚本缺工具链会直接报错，不会悄悄退回动态链接）。直接 `cargo build --release` 得到的是链系统 glibc 的动态二进制，换台老发行版就可能报 `GLIBC_2.xx not found`。
