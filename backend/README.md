@@ -304,4 +304,4 @@ docker run -p 8080:8080 -v $PWD/data:/data \
   offline-market:0.1
 ```
 
-离线环境：在有网的机器上 `cargo build --release`（或 build 镜像），把 `target/release/offline-market-backend` 带进内网即可；运行期零依赖（SQLite 已 bundled 进二进制）。注意本机 `cargo build` 默认链系统 glibc，要真静态链接得走 musl：`cargo build --release --target x86_64-unknown-linux-musl`（镜像里就是这么编的）。
+离线环境：在有网的机器上编 release 二进制（或 build 镜像），把二进制带进内网即可；运行期零依赖（SQLite 已 bundled 进二进制）。要**真静态链接**得走 musl：`rustup target add x86_64-unknown-linux-musl` + 装 musl 的 C 编译器（`musl-tools`），`cargo build --release --target x86_64-unknown-linux-musl`，产物在 `target/x86_64-unknown-linux-musl/release/offline-market-backend`。CI 的 Release tarball 和 `deploy/scripts/build-offline-bundle.sh` 都是这么编的（脚本缺工具链会直接报错，不会悄悄退回动态链接）。直接 `cargo build --release` 得到的是链系统 glibc 的动态二进制，换台老发行版就可能报 `GLIBC_2.xx not found`。

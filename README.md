@@ -113,7 +113,7 @@ python3 deploy/scripts/preflight.py --market-url ... --runtimes-dir ... --app-ur
 
 | 工作流 | 触发 | 内容 |
 | --- | --- | --- |
-| `backend.yml` | 改动 `backend/**`、推 tag `v*`、手动 | `cargo fmt --check` → `clippy -D warnings` → `cargo test --all-targets` → release 构建 → 上传 artifact；**推 `v*` tag 时自动建 Release 并附二进制 tarball + sha256** |
+| `backend.yml` | 改动 `backend/**`、推 tag `v*`、手动 | `cargo fmt --check` → `clippy -D warnings` → `cargo test --all-targets` → release 构建（musl 静态，构建后断言没有 `PT_INTERP`）→ 上传 artifact；**推 `v*` tag 时自动建 Release 并附二进制 tarball + sha256** |
 | `backend-image.yml` | 改动 `backend/**`、推 tag `v*`、手动 | 跑一遍测试 → 构建后端镜像（linux/amd64）→ **推 ghcr.io** → 导出 `docker save` tarball 上传 artifact（tag 时也挂到 Release）；PR 只构建不推送 |
 | `plugin.yml` | 改动 `plugin/**`、手动 | `pytest`（111 项，不装 QwenPaw、不联网）+ `compileall` |
 | `plugin-package.yml` | 改动 `plugin/**`、推 tag `v*`、手动 | `pytest` → 打离线插件 zip（`dist/offline-market-plugin-<ver>-linux-x86_64.zip` + sha256）→ 解压后 `compileall` 复验 → 上传 artifact（tag 时挂到 Release） |
@@ -126,6 +126,9 @@ git tag v0.1.6 && git push origin v0.1.6
 #   以及 offline-market-image-<ver>-linux-amd64.tar(.sha256)
 #   以及 offline-market-plugin-<ver>-linux-x86_64.zip(.sha256)
 ```
+
+后端那份 tarball 里是 musl 静态二进制（`file` 显示 `statically linked`），
+任何 x86_64 Linux 解包就能跑，不用管 glibc 版本。
 
 镜像（ghcr.io/ligandlly/qwenpaw-offline-skill-market）约 13 MB（alpine + musl 静态二进制，
 `docker save` 出来的 tarball 约 10 MB）：

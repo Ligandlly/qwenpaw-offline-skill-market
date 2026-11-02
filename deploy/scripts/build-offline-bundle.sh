@@ -15,11 +15,45 @@ name="offline-market-${version}-${os}-${arch}"
 dist="$root/dist"
 stage="$dist/$name"
 
-echo "==> building release binary"
-( cd "$root/backend" && cargo build --release --locked 2>/dev/null || cargo build --release )
+# 目标三元组跟着本机架构走，编 musl 静态二进制：内网那台机器不用管 glibc 版本
+# （老发行版上动态链接会直接报 GLIBC_2.xx not found）。
+case "$(uname -m)" in
+  x86_64 | amd64) target="x86_64-unknown-linux-musl" ;;
+  aarch64 | arm64) target="aarch64-unknown-linux-musl" ;;
+  *)
+    echo "不支持的本机架构：$(uname -m)（包名里的 arch 也是它）" >&2
+    exit 1
+    ;;
+esac
 
-binary="$root/backend/target/release/offline-market-backend"
-[ -f "$binary" ] || { echo "构建产物不存在：$binary"; exit 1; }
+if ! rustup target list --installed 2>/dev/null | grep -qx "$target"; then
+  echo "缺少 musl target。先装：" >&2
+  echo "  rustup target add $target" >&2
+  echo "再装一个 musl 的 C 编译器（bundled SQLite 要用）：" >&2
+  echo "  Debian/Ubuntu: apt-get install musl-tools   Fedora: dnf install musl-gcc   Arch: pacman -S musl" >&2
+  exit 1
+fi
+
+echo "==> building release binary ($target)"
+( cd "$root/backend" && cargo build --release --locked --target "$target" 2>/dev/null || cargo build --release --target "$target" )
+
+binary="$root/backend/target/$target/release/offline-market-backend"
+[ -f "$binary" ] || { echo "构建产物不存在：$binary" >&2; exit 1; }
+
+# 静态是这个包的全部卖点，动态链接了就当场停下（有 PT_INTERP 就不是静态）。
+if command -v readelf >/dev/null; then
+  if readelf -l "$binary" 2>/dev/null | grep -q 'interpreter'; then
+    echo "$binary 是动态链接的，不能当离线包发" >&2
+    exit 1
+  fi
+elif command -v file >/dev/null; then
+  if ! file "$binary" | grep -q 'statically linked'; then
+    echo "$binary 是动态链接的，不能当离线包发" >&2
+    exit 1
+  fi
+else
+  echo "提示：没有 readelf/file，跳过静态链接校验" >&2
+fi
 
 echo "==> staging $stage"
 rm -rf "$stage"

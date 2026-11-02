@@ -70,7 +70,14 @@ cp deploy/systemd/offline-market.service /etc/systemd/system/
 systemctl daemon-reload && systemctl enable --now offline-market
 ```
 
-二进制是静态链接 + bundled SQLite，运行期零依赖（不需要 libsqlite3、不需要 Python）。
+二进制是静态链接（musl）+ bundled SQLite，运行期零依赖（不需要 libsqlite3、不需要 Python，
+也不挑 glibc 版本）。拿到的包是这样确认的：
+
+```bash
+file bin/offline-market-backend    # ELF 64-bit ... statically linked
+ldd  bin/offline-market-backend    # not a dynamic executable
+```
+
 
 `MARKET_PUBLIC_URL` 同样只在这里配，**且只在进程启动时读一次**（`backend/src/config.rs`）：
 
