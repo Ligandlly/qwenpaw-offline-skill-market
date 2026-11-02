@@ -19,7 +19,7 @@
 
 | 目录 | 内容 |
 | --- | --- |
-| `backend/` | 市场后端：Rust + axum + rusqlite（SQLite bundled），53 个测试 |
+| `backend/` | 市场后端：Rust + axum + rusqlite（SQLite bundled），114 个测试 |
 | `plugin/` | QwenPaw 2.2.2 插件：技能/智能体市场路由 + 侧边栏页面（卡片/列表目录 + 概览 Dashboard），111 个测试 |
 | `deploy/` | docker-compose / systemd / 离线打包 / preflight / 端到端验收脚本 |
 | `docs/` | `OPS.md` 部署运维手册、`ACCEPTANCE.md` 验收标准、`AGENT_MARKET.md` 智能体市场设计与契约 |

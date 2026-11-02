@@ -3,7 +3,7 @@
 离线市场的 QwenPaw 插件。**只做三件事**：让宿主原生 Skills 页认得这个市场、给自己的侧边栏页面提供 HTTP 路由（技能 + 智能体）、渲染那个页面。安装、校验、扫描、落盘全由宿主完成。
 
 ```bash
-python -m pytest          # 107 个测试，不需要宿主、不需要网络
+python -m pytest          # 111 个测试，不需要宿主、不需要网络
 ```
 
 ## 装机
@@ -262,7 +262,7 @@ offline_market/
   host.py                    # 本 runtime 的宿主 API 客户端（token 透传、loopback 限制、multipart）
   agents.py                  # 智能体快照 / 安装状态机 / 回滚 / 本机账本
   routes.py                  # 自用 HTTP 路由（fastapi 延迟导入）
-tests/                       # 107 个测试：闸门、映射、错误透传、路由、解压、快照/安装/回滚
+tests/                       # 111 个测试：闸门、映射、错误透传、路由、解压、快照/安装/回滚
 ```
 
 ## 实测链路（本机，backend 8099 + qwenpaw 8123）

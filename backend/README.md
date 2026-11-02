@@ -4,7 +4,7 @@ QwenPaw 2.2.2 离线技能市场的后端（Rust + axum + SQLite）。**不做�
 
 ```bash
 cargo run                 # 默认 0.0.0.0:8080, data/market.sqlite3
-cargo test                # 51 个测试（24 单测 + 27 集成）
+cargo test                # 114 个测试（35 单测 + 79 集成）
 ```
 
 首次启动若未设置 `ADMIN_PASSWORD`，会生成一次性管理员密码并打印一次。

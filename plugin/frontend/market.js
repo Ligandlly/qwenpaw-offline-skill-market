@@ -13,7 +13,7 @@
  * or the host API directly.
  */
 const PLUGIN_ID = "offline-market";
-const PLUGIN_VERSION = "0.1.7"; // keep in sync with plugin.json
+const PLUGIN_VERSION = "0.1.8"; // keep in sync with plugin.json
 const PLUGIN_LABEL = "内网市场";
 const VISIBILITY_LABEL = { public: "公开", tenant: "仅本租户" };
 const STATE_LABEL = { active: "已上架", withdrawn: "已撤回", taken_down: "已下架" };
