@@ -34,7 +34,9 @@ docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.ghcr.yml up
 ```
 
 镜像由 `.github/workflows/backend-image.yml` 推：`ghcr.io/ligandlly/qwenpaw-offline-skill-market`
-（`:latest` = main 分支，`:v0.1.4` = tag）。完全离线的机器连 ghcr 也访问不了时，
+（`:latest` = main 分支，`:v0.1.4` = tag）。镜像约 13 MB（alpine + musl 静态二进制，
+没有 apt，运行期只依赖 busybox 的 wget 做 healthcheck），`docker save` 出来的 tarball
+约 10 MB，拷进内网不费劲。完全离线的机器连 ghcr 也访问不了时，
 在有网的机器上 `docker pull` + `docker save`，把 tarball 拷进去 `docker load`，
 然后直接用 `docker-compose.ghcr.yml` 起就行：它没有 `pull_policy: always`，
 本地已有同名镜像时 compose 不会联网拉取（默认 `pull_policy: missing`）。

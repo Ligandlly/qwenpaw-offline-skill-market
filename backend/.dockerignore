@@ -1,3 +1,7 @@
 target
 data
 *.log
+# 测试与文档不进构建上下文：镜像只需要 Cargo.toml / Cargo.lock / src
+tests
+Dockerfile
+.dockerignore

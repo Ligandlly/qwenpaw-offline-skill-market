@@ -127,7 +127,8 @@ git tag v0.1.6 && git push origin v0.1.6
 #   以及 offline-market-plugin-<ver>-linux-x86_64.zip(.sha256)
 ```
 
-镜像（ghcr.io/ligandlly/qwenpaw-offline-skill-market）：
+镜像（ghcr.io/ligandlly/qwenpaw-offline-skill-market）约 13 MB（alpine + musl 静态二进制，
+`docker save` 出来的 tarball 约 10 MB）：
 
 ```bash
 docker pull ghcr.io/ligandlly/qwenpaw-offline-skill-market:latest   # main 分支

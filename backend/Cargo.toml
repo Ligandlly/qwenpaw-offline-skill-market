@@ -26,3 +26,12 @@ tracing-subscriber = { version = "0.3", default-features = false, features = ["f
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
+
+# 发布构建面向「打包成镜像装进离线内网」：体积优先，但不动 opt-level
+# （SQLite / argon2 是 CPU 热点）。strip 掉符号表，thin LTO + 单 codegen
+# unit 让二进制小一截同时也不牺牲运行性能。
+# 不加 panic = "abort"：tests/transport.rs 有测试靠 unwind 只弄挂单个请求。
+[profile.release]
+strip = "symbols"
+lto = "thin"
+codegen-units = 1
