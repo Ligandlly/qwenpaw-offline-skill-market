@@ -19,7 +19,7 @@
 
 | 目录 | 内容 |
 | --- | --- |
-| `backend/` | 市场后端：Rust + axum + rusqlite（SQLite bundled），114 个测试 |
+| `backend/` | 市场后端：Rust + axum + rusqlite（SQLite bundled），116 个测试 |
 | `plugin/` | QwenPaw 2.2.2 插件：技能/智能体市场路由 + 侧边栏页面（卡片/列表目录 + 概览 Dashboard），111 个测试 |
 | `deploy/` | docker-compose / systemd / 离线打包 / preflight / 端到端验收脚本 |
 | `docs/` | `OPS.md` 部署运维手册、`ACCEPTANCE.md` 验收标准、`AGENT_MARKET.md` 智能体市场设计与契约 |
@@ -49,6 +49,48 @@ python3 -m venv .venv && .venv/bin/python -m pip install -r requirements-dev.txt
 bash deploy/scripts/build-offline-bundle.sh     # 全套（后端二进制 + 插件 + 部署文件）-> dist/*.tar.gz
 python3 deploy/scripts/build-plugin-zip.py      # 只要插件 -> dist/offline-market-plugin-<ver>-linux-x86_64.zip
 ```
+
+## 对外统计 API（供其他应用调用）
+
+除了租户「概览」页用的 `/api/v1/stats`（需要 `X-Tenant-Id`，只统计该租户可见的内容），
+后端还提供一个**面向其他应用的只读全局统计接口**，把整个 Hub 的 Dashboard 数据开放给
+监控大屏、运维面板等内部程序：
+
+```bash
+curl -s http://market.internal:8080/api/v1/hub/stats
+```
+
+- **无需任何身份头**：不要 `X-Tenant-Id`，也不要管理员 Cookie。它与租户/管理员两个
+  身份平面都无关，安全前提与 `X-Tenant-Id` 相同——**后端只部署在隔离内网**，不要把
+  这个端口暴露到不可信网络。
+- **只读**：仅 `GET`，不写任何表，不产生审计记录。
+- **全局口径**：统计所有租户的全部技能与智能体，公开（`public`）与租户私有
+  （`private`，即 `visibility=tenant`）都计入，并分别给出数量。
+- **与 Dashboard 相同的展示语义**：`total` / `new_this_month` 只算活跃条目（已下架
+  takedown、已撤回 withdrawn 的不计）；`downloads` 是累计成功下载次数，下架/撤回
+  **不会抹掉历史下载量**。下载计数由后台任务每隔几秒写回，可能滞后一个写回周期。
+
+响应示例（时间戳为 Unix 秒）：
+
+```json
+{
+  "scope": "hub",
+  "skills": { "total": 3, "public": 2, "private": 1, "new_this_month": 3, "downloads": 2 },
+  "agents": { "total": 1, "public": 1, "private": 0, "new_this_month": 1, "downloads": 0 },
+  "totals": { "skills": 3, "agents": 1, "downloads": 2, "new_this_month": 4 },
+  "month_start": 1761955200,
+  "generated_at": 1763476200
+}
+```
+
+| 字段 | 含义 |
+| --- | --- |
+| `skills` / `agents` | 分类型统计：`total` 活跃总数、`public`/`private` 按可见性拆分、`new_this_month` 本月新增（自 `month_start` 起）、`downloads` 累计下载 |
+| `totals` | 两类合计：`skills`/`agents` 活跃总数、`downloads` 总下载、`new_this_month` 本月新增合计 |
+| `month_start` | 本月起点（UTC，SQLite `start of month`） |
+| `generated_at` | 本次统计生成时间 |
+
+实现见 `backend/src/stats.rs`（`hub_overview`），路由注册在 `backend/src/lib.rs`。
 
 ## 部署前必须知道的两件事
 

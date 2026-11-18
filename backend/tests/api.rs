@@ -724,6 +724,93 @@ async fn dashboard_counts_visible_active_items_and_keeps_download_history() {
 }
 
 #[tokio::test]
+async fn hub_stats_answers_without_any_identity_on_an_empty_market() {
+    let h = Harness::new();
+    // No X-Tenant-Id, no admin cookie: the endpoint is for other apps on the
+    // isolated network, so it must not borrow either identity plane.
+    let (status, stats, _) = h.call("GET", "/api/v1/hub/stats", None, None, None).await;
+    assert_eq!(status, StatusCode::OK, "{stats}");
+    assert_eq!(stats["scope"], "hub");
+    assert_eq!(stats["skills"]["total"], 0);
+    assert_eq!(stats["skills"]["public"], 0);
+    assert_eq!(stats["skills"]["private"], 0);
+    assert_eq!(stats["agents"]["total"], 0);
+    assert_eq!(stats["totals"]["downloads"], 0);
+    assert_eq!(stats["totals"]["new_this_month"], 0);
+    assert!(stats["month_start"].as_i64().unwrap() > 0);
+    assert!(stats["generated_at"].as_i64().unwrap() > 0);
+}
+
+#[tokio::test]
+async fn hub_stats_counts_every_tenant_and_keeps_download_history() {
+    let h = Harness::new();
+    h.publish_skill("tenant-a", "demo", "1.0.0", "public").await;
+    h.publish_skill("tenant-a", "internal", "1.0.0", "tenant")
+        .await;
+    h.publish_skill("tenant-b", "other", "1.0.0", "public")
+        .await;
+    h.publish_agent("tenant-b", "helper", "1.0.0", "public")
+        .await;
+
+    for _ in 0..2 {
+        let (status, _, _) = h
+            .call("GET", "/skills/demo/latest", Some("tenant-b"), None, None)
+            .await;
+        assert_eq!(status, StatusCode::OK);
+    }
+    h.flush();
+
+    // The tenant dashboard hides tenant-a's private skill from tenant-b; the
+    // hub view must include it — that is the whole point of the global scope.
+    let (status, stats, _) = h.call("GET", "/api/v1/hub/stats", None, None, None).await;
+    assert_eq!(status, StatusCode::OK, "{stats}");
+    assert_eq!(stats["skills"]["total"], 3);
+    assert_eq!(stats["skills"]["public"], 2);
+    assert_eq!(stats["skills"]["private"], 1);
+    assert_eq!(stats["skills"]["new_this_month"], 3);
+    assert_eq!(stats["skills"]["downloads"], 2);
+    assert_eq!(stats["agents"]["total"], 1);
+    assert_eq!(stats["agents"]["public"], 1);
+    assert_eq!(stats["agents"]["private"], 0);
+    assert_eq!(stats["totals"]["skills"], 3);
+    assert_eq!(stats["totals"]["agents"], 1);
+    assert_eq!(stats["totals"]["downloads"], 2);
+    assert_eq!(stats["totals"]["new_this_month"], 4);
+
+    // Takedown and withdraw shrink the active counts but never the cumulative
+    // downloads — same showcase semantics as the tenant dashboard.
+    let cookie = h.login().await;
+    let (status, _, _) = h
+        .call(
+            "POST",
+            "/admin/api/skills/demo/takedown",
+            None,
+            Some(json!({ "reason": "test" })),
+            Some(&cookie),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _, _) = h
+        .call(
+            "POST",
+            "/api/v1/skills/internal/withdraw",
+            Some("tenant-a"),
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (_, stats, _) = h.call("GET", "/api/v1/hub/stats", None, None, None).await;
+    assert_eq!(stats["skills"]["total"], 1);
+    assert_eq!(stats["skills"]["public"], 1);
+    assert_eq!(stats["skills"]["private"], 0);
+    assert_eq!(stats["skills"]["new_this_month"], 1);
+    assert_eq!(stats["skills"]["downloads"], 2);
+    assert_eq!(stats["totals"]["downloads"], 2);
+}
+
+#[tokio::test]
 async fn listing_reports_totals_and_whitelisted_sort_orders() {
     let h = Harness::new();
     for slug in ["alpha", "beta", "gamma"] {

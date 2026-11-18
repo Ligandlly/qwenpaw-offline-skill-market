@@ -53,6 +53,9 @@ pub fn router(app: Shared) -> Router {
         // ---- tenant plane ----
         .route("/api/v1/limits", get(api::get_limits))
         .route("/api/v1/stats", get(stats::overview))
+        // ---- open read-only plane (isolated network, no identity headers) ----
+        // Hub-wide dashboard aggregates for other apps; see stats::hub_overview.
+        .route("/api/v1/hub/stats", get(stats::hub_overview))
         .route(
             "/api/v1/skills",
             get(api::list_skills).post(api::publish).layer(bundle_limit),
