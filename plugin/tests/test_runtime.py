@@ -95,17 +95,57 @@ def test_default_market_url_is_trimmed_of_trailing_slash(env):
     assert PluginSettings().market_url == "http://market.test"
 
 
-def test_hardcoded_market_url_wins_over_config_and_env(env, monkeypatch):
-    """The hardcoded entry is the operator's explicit last word."""
-    monkeypatch.setattr(runtime, "HARDCODED_MARKET_URL", "http://hardcoded.test/")
+def test_json_config_market_url_wins_over_config_and_env(env):
+    """market.config.json is the operator's explicit last word."""
+    runtime.market_config_path().write_text(
+        json.dumps({"market_url": "http://from-file.test/"}), encoding="utf-8"
+    )
     settings = PluginSettings({"market_url": "http://configured.test/"})
-    assert settings.market_url == "http://hardcoded.test"
+    assert settings.market_url == "http://from-file.test"
 
 
-def test_blank_hardcoded_market_url_keeps_normal_precedence(env, monkeypatch):
-    monkeypatch.setattr(runtime, "HARDCODED_MARKET_URL", "   ")
+def test_blank_json_config_market_url_keeps_normal_precedence(env):
+    runtime.market_config_path().write_text(
+        json.dumps({"market_url": "   "}), encoding="utf-8"
+    )
     settings = PluginSettings({"market_url": "http://configured.test/"})
     assert settings.market_url == "http://configured.test"
+
+
+def test_missing_json_config_keeps_normal_precedence(env):
+    # The env fixture points market_config_path() at a file that does not exist.
+    assert not runtime.market_config_path().exists()
+    settings = PluginSettings({"market_url": "http://configured.test/"})
+    assert settings.market_url == "http://configured.test"
+
+
+def test_broken_json_config_falls_back_instead_of_breaking_the_market(env):
+    path = runtime.market_config_path()
+    for broken in ("{not json", json.dumps(["market_url"]), json.dumps({"market_url": 42})):
+        path.write_text(broken, encoding="utf-8")
+        settings = PluginSettings({"market_url": "http://configured.test/"})
+        assert settings.market_url == "http://configured.test", broken
+
+
+def test_json_config_edit_takes_effect_without_reinstall(env):
+    """Editing the installed copy works: stat-change fast path + TTL bound."""
+    clock = [1000.0]
+    env.setattr(runtime.time, "monotonic", lambda: clock[0])
+    path = runtime.market_config_path()
+    path.write_text(json.dumps({"market_url": "http://old.test"}), encoding="utf-8")
+    assert PluginSettings().market_url == "http://old.test"
+    # Same content again: served from cache, still correct.
+    assert PluginSettings().market_url == "http://old.test"
+    # Different size -> different stat key -> picked up immediately.
+    path.write_text(json.dumps({"market_url": "http://newer.test"}), encoding="utf-8")
+    assert PluginSettings().market_url == "http://newer.test"
+    # Same-size edit: overlayfs-style filesystems may keep mtime identical,
+    # so the TTL must bound staleness even when the stat key does not move.
+    path.write_text(json.dumps({"market_url": "http://fresh.test"}), encoding="utf-8")
+    clock[0] += runtime._MARKET_CONFIG_TTL + 1
+    assert PluginSettings().market_url == "http://fresh.test"
+    path.unlink()
+    assert PluginSettings().market_url == "http://market.test"  # back to env
 
 
 def test_market_url_problem_flags_an_inner_space(env):

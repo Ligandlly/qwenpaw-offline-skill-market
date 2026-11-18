@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 import urllib.parse
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -34,20 +35,67 @@ UNKNOWN_MODE = "unknown"
 DEFAULT_MARKET_URL = "http://localhost:8080"
 
 # ============================================================================
-# 硬编码入口：只改下面这一行，就能把市场地址写死进插件。
+# 外置配置入口：插件根目录的 market.config.json（与 plugin.json 同级）。
 #
-# 典型场景：内网打一次性插件包，不想给每个租户 runtime 配 hub credentials /
-# config.json。把 "" 改成后端地址（如 "http://10.137.157.214:8080"），
-# 重装插件（qwenpaw plugin install ./plugin --force）即可生效。
+# 典型场景：内网部署不想给每个租户 runtime 配 hub credentials / config.json。
+# 只改 JSON、不改代码：{ "market_url": "http://10.137.157.214:8080" }。
+# 可以直接编辑已安装插件副本里的这份文件（mtime/大小变化立即生效，
+# 否则最迟 30 秒生效，无需重装插件）；打包前改源码里的这份则随插件包分发。
 #
 # 非空时优先级最高：config.json 的 plugins.offline-market.market_url 与
-# OFFLINE_MARKET_URL 都会被忽略。留空（默认）= 不覆盖，顺序仍是：
-#   plugin_config.market_url > OFFLINE_MARKET_URL > DEFAULT_MARKET_URL
+# OFFLINE_MARKET_URL 都会被忽略。留空 / 文件缺失 / JSON 解析失败 = 不覆盖，
+# 顺序仍是：plugin_config.market_url > OFFLINE_MARKET_URL > DEFAULT_MARKET_URL
 #
 # 地址必须与后端的 MARKET_PUBLIC_URL 逐字符相同（docs/OPS.md §2.1），
 # 否则安装会在宿主侧报 URL does not belong to Hub 'offline-market'。
 # ============================================================================
-HARDCODED_MARKET_URL = ""
+MARKET_CONFIG_FILENAME = "market.config.json"
+
+# market_url 在宿主每次列目录/搜索的热路径上被读（available()），所以常态
+# 只花一次 stat()，文件变了才重新解析。但有的文件系统（如 overlayfs）对
+# 快速连续写入给出相同的 mtime，同尺寸编辑会骗过 (mtime, size) 键，
+# 所以另加 TTL 上限（与扫描模式门控的 _SCAN_MODE_TTL 同一口径）。
+_MARKET_CONFIG_TTL = 30.0
+
+# ((path, mtime_ns, size), fetched_at, url)
+_market_config_cache: tuple[tuple[str, int, int], float, str] | None = None
+
+
+def market_config_path() -> Path:
+    """插件根目录（offline_market 包的上一层）里的 market.config.json。"""
+    return Path(__file__).resolve().parent.parent / MARKET_CONFIG_FILENAME
+
+
+def file_market_url() -> str:
+    """market.config.json 里的后端地址；未配置/不可读时返回 ""。
+
+    配置文件坏了不能把整个市场拖死：解析失败视同未配置，回退到常规优先级链。
+    """
+    global _market_config_cache
+    path = market_config_path()
+    try:
+        stat = path.stat()
+    except OSError:
+        _market_config_cache = None
+        return ""
+    key = (str(path), stat.st_mtime_ns, stat.st_size)
+    fetched_at = time.monotonic()
+    if (
+        _market_config_cache is not None
+        and _market_config_cache[0] == key
+        and fetched_at - _market_config_cache[1] < _MARKET_CONFIG_TTL
+    ):
+        return _market_config_cache[2]
+    url = ""
+    try:
+        with open(path, encoding="utf-8") as handle:
+            payload = json.load(handle)
+        if isinstance(payload, dict) and isinstance(payload.get("market_url"), str):
+            url = payload["market_url"].strip()
+    except (OSError, ValueError):
+        url = ""
+    _market_config_cache = (key, fetched_at, url)
+    return url
 
 # Scan-mode config is re-read at most this often (seconds). Editing
 # config.json or the env is an operator action, not a hot loop.
@@ -138,7 +186,7 @@ class PluginSettings:
     @property
     def market_url(self) -> str:
         raw = _first(
-            HARDCODED_MARKET_URL,
+            file_market_url(),
             str(self.plugin_config.get("market_url") or ""),
             os.environ.get("OFFLINE_MARKET_URL"),
         ) or DEFAULT_MARKET_URL

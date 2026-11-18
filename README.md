@@ -20,7 +20,7 @@
 | 目录 | 内容 |
 | --- | --- |
 | `backend/` | 市场后端：Rust + axum + rusqlite（SQLite bundled），116 个测试 |
-| `plugin/` | QwenPaw 2.2.2 插件：技能/智能体市场路由 + 侧边栏页面（卡片/列表目录 + 概览 Dashboard），111 个测试 |
+| `plugin/` | QwenPaw 2.2.2 插件：技能/智能体市场路由 + 侧边栏页面（卡片/列表目录 + 概览 Dashboard），114 个测试 |
 | `deploy/` | docker-compose / systemd / 离线打包 / preflight / 端到端验收脚本 |
 | `docs/` | `OPS.md` 部署运维手册、`ACCEPTANCE.md` 验收标准、`AGENT_MARKET.md` 智能体市场设计与契约 |
 | `spikes/` | M0 阶段对 2.2.2 的实证结论（11 条）、浏览器验证脚本与无头 UI 冒烟脚本 |
@@ -115,15 +115,16 @@ curl -s http://market.internal:8080/api/v1/hub/stats
    宿主机的局域网 IP 往往不通（发布端口只挂在 `127.0.0.1` 与网桥地址上），要用
    `host.docker.internal:8080` 或把后端容器接进同一 docker 网络用容器名。
 
-   **也可以直接把地址硬编码进插件**（内网一次性打包、不想逐个租户配 credentials 时）：
-   ```python
-   # plugin/offline_market/runtime.py 顶部
-   HARDCODED_MARKET_URL = "http://market.internal:8080"
+   **也可以用 JSON 配置文件指定后端地址**（内网一次性打包、不想逐个租户配 credentials 时）：
+   改插件根目录的 [`plugin/market.config.json`](plugin/market.config.json)（与 `plugin.json` 同级）：
+   ```json
+   { "market_url": "http://market.internal:8080" }
    ```
-   改完必须 `qwenpaw plugin install ./plugin --force` 重装（插件目录是副本，改源码不生效）。
-   非空时它**优先级最高**，会忽略插件配置 `market_url` 和 `OFFLINE_MARKET_URL`；留空则维持
-   常规顺序（`market_url` > `OFFLINE_MARKET_URL` > `http://localhost:8080`）。地址同样必须与
-   后端 `MARKET_PUBLIC_URL` 逐字符相同（地址中不能有空格，IPv4 写成 `10.10.145.48` 而不是 `10 .10.145.48`）；生效值可用 `GET /api/offline-market/config` 的
+   不用改任何代码。两种用法：打包前改源码里的这份（随插件包分发）；或安装后直接编辑
+   已安装插件副本里的这份——**无需重装插件**，mtime/大小变化立即生效，否则最迟 30 秒生效。
+   非空时它**优先级最高**，会忽略插件配置 `market_url` 和 `OFFLINE_MARKET_URL`；留空（默认）/
+   文件缺失/JSON 解析失败则维持常规顺序（`market_url` > `OFFLINE_MARKET_URL` > `http://localhost:8080`）。
+   地址同样必须与后端 `MARKET_PUBLIC_URL` 逐字符相同（地址中不能有空格，IPv4 写成 `10.10.145.48` 而不是 `10 .10.145.48`）；生效值可用 `GET /api/offline-market/config` 的
    `market_url` 确认。
 
 详见 [`docs/OPS.md`](docs/OPS.md)。
@@ -157,7 +158,7 @@ python3 deploy/scripts/preflight.py --market-url ... --runtimes-dir ... --app-ur
 | --- | --- | --- |
 | `backend.yml` | 改动 `backend/**`、推 tag `v*`、手动 | `cargo fmt --check` → `clippy -D warnings` → `cargo test --all-targets` → release 构建（musl 静态，构建后断言没有 `PT_INTERP`）→ 上传 artifact；**推 `v*` tag 时自动建 Release 并附二进制 tarball + sha256** |
 | `backend-image.yml` | 改动 `backend/**`、推 tag `v*`、手动 | 跑一遍测试 → 构建后端镜像（linux/amd64）→ **推 ghcr.io** → 导出 `docker save` tarball 上传 artifact（tag 时也挂到 Release）；PR 只构建不推送 |
-| `plugin.yml` | 改动 `plugin/**`、手动 | `pytest`（111 项，不装 QwenPaw、不联网）+ `compileall` |
+| `plugin.yml` | 改动 `plugin/**`、手动 | `pytest`（114 项，不装 QwenPaw、不联网）+ `compileall` |
 | `plugin-package.yml` | 改动 `plugin/**`、推 tag `v*`、手动 | `pytest` → 打离线插件 zip（`dist/offline-market-plugin-<ver>-linux-x86_64.zip` + sha256）→ 解压后 `compileall` 复验 → 上传 artifact（tag 时挂到 Release） |
 
 发一个版本：
